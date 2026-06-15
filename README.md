@@ -1,8 +1,11 @@
 # CodeWithMe
 
-A real-time collaborative coding platform (a mini LeetCode + VS Code). This
-repo currently implements **Phase 1 — the single-player foundation**: auth, a
-Monaco-based editor, problem browsing, and saving code to Postgres.
+A real-time collaborative coding platform (a mini LeetCode + VS Code).
+
+- **Phase 1 — single-player foundation:** auth, a Monaco editor, problem
+  browsing, and saving code to Postgres.
+- **Phase 2 — collaboration engine:** multiplayer rooms with Yjs + y-webrtc
+  text sync (peer-to-peer) and a Socket.IO server for presence + live cursors.
 
 ## Tech stack
 
@@ -47,42 +50,75 @@ few starter problems.
 > "Confirm email"*, or use the confirmation link (handled by
 > `/auth/callback`).
 
-### 4. Run the dev server
+### 4. Run the dev servers
+
+Phase 2 adds a realtime Node process (Socket.IO + y-webrtc signaling) alongside
+Next.js. Run both at once:
 
 ```bash
 npm install
-npm run dev
+npm run dev:all      # Next.js (:3000) + realtime server (:3001 / :4444)
 ```
+
+Or run them in separate terminals: `npm run dev` and `npm run server`.
 
 Open [http://localhost:3000](http://localhost:3000). You'll be redirected to
 `/login`; sign up, then you'll land on `/problems`.
 
+### Try multiplayer
+
+1. From `/problems`, click **New collaborative session** — you'll land on
+   `/room/<id>`.
+2. Click **Copy invite link** and open it in a second browser window (or a
+   different signed-in account / incognito tab).
+3. Type in either window: text syncs instantly (peer-to-peer over WebRTC), and
+   you'll see the other person's caret, name tag, and selection.
+
 ## Project structure
 
 ```
+server/
+  index.ts                      # Socket.IO presence/cursors (:3001) entry
+  signaling.ts                  # self-hosted y-webrtc signaling relay (:4444)
 src/
   proxy.ts                      # Next 16 "middleware": session refresh + guards
   lib/
     supabase/{client,server,proxy}.ts   # Supabase clients per context
     auth.ts                     # requireUser() / getUser() DAL helpers
     types.ts                    # shared types, language list, starter code
+    collab.ts                   # room user/cursor types + color helper
   components/
-    CodeEditor.tsx              # Monaco wrapper
+    CodeEditor.tsx              # Monaco wrapper (single-player)
     Workspace.tsx               # editor + language switch + save (client)
+    CollaborativeEditor.tsx     # Yjs+y-webrtc text sync + Socket.IO cursors
+    CreateRoomButton.tsx        # spins up a new /room/<id>
     Header.tsx                  # nav + sign out
   app/
     login/                      # auth page, form, server actions
     auth/callback/route.ts      # email-confirmation code exchange
     problems/                   # list + [slug] detail with editor
+    room/[id]/                  # collaborative session page
 supabase/schema.sql             # DB schema + seed data
 ```
 
+## How the realtime layer fits together
+
+- **Text** syncs peer-to-peer: `y-monaco` binds the Monaco model to a Yjs doc,
+  which `y-webrtc` replicates between browsers. Conflict-free by construction
+  (CRDT) — that's the "zero text-conflict" guarantee.
+- **WebRTC signaling** (peer discovery only, no text) runs on our own server in
+  `server/signaling.ts`, so we don't depend on flaky public signaling servers.
+- **Presence & cursors** ride a separate Socket.IO channel (`server/index.ts`):
+  each client broadcasts its caret/selection, and remote carets are rendered as
+  Monaco content widgets + decorations.
+
 ## Milestone status
 
-✅ A user can log in, select a problem, type code into a Monaco editor, and save
-their progress to the database — the Phase 1 milestone.
+✅ **Phase 1** — log in, pick a problem, edit in Monaco, save to Postgres.
+✅ **Phase 2** — multiplayer rooms: Google-Docs-style text sync with visible
+remote cursors and no text conflicts.
 
-## Next (Phase 2+)
+## Next (Phase 3+)
 
-Real-time collaboration (Socket.IO), live cursors, Docker-sandboxed code
-execution, contests, replay, and the AI features from the roadmap.
+Docker-sandboxed code execution, contests, code replay, and the AI features
+(reviewer, hints, plagiarism detection) from the roadmap.

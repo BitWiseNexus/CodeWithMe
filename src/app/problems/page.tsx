@@ -1,5 +1,6 @@
 import Link from "next/link";
 import { Header } from "@/components/Header";
+import { CreateRoomButton } from "@/components/CreateRoomButton";
 import { requireUser } from "@/lib/auth";
 import { createClient } from "@/lib/supabase/server";
 import type { Difficulty, Problem } from "@/lib/types";
@@ -22,7 +23,10 @@ export default async function ProblemsPage() {
     <div className="flex min-h-screen flex-col">
       <Header />
       <main className="mx-auto w-full max-w-3xl flex-1 p-6">
-        <h1 className="mb-6 text-2xl font-bold">Problems</h1>
+        <div className="mb-6 flex items-center justify-between">
+          <h1 className="text-2xl font-bold">Problems</h1>
+          <CreateRoomButton />
+        </div>
 
         {error && (
           <p className="rounded-md bg-red-500/10 p-3 text-sm text-red-500">
