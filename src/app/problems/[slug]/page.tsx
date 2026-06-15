@@ -92,6 +92,9 @@ export default async function ProblemPage({
             problemId={problem.id}
             initialLanguage="python"
             savedCode={savedCode}
+            socketUrl={
+              process.env.NEXT_PUBLIC_SOCKET_URL ?? "http://localhost:3001"
+            }
           />
         </section>
       </div>

@@ -5,6 +5,7 @@ import { startSignalingServer } from "./signaling";
 const SOCKET_PORT = Number(process.env.SOCKET_PORT ?? 3001);
 const SIGNALING_PORT = Number(process.env.SIGNALING_PORT ?? 4444);
 const CLIENT_ORIGIN = process.env.CLIENT_ORIGIN ?? "http://localhost:3000";
+const WORKER_SECRET = process.env.WORKER_SECRET ?? "dev-worker-secret";
 
 // --- Types shared with the client (kept in sync with src/lib/collab.ts) ---
 interface RoomUser {
@@ -62,6 +63,11 @@ io.on("connection", (socket) => {
     socket.to(roomId).emit("cursor", { user, ...payload });
   });
 
+  // Client subscribes to results for a specific execution it kicked off.
+  socket.on("watch", ({ executionId }: { executionId: string }) => {
+    if (typeof executionId === "string") socket.join(`exec:${executionId}`);
+  });
+
   socket.on("disconnecting", () => {
     const roomId = socket.data.roomId as string | undefined;
     if (!roomId) return;
@@ -70,6 +76,22 @@ io.on("connection", (socket) => {
     setTimeout(async () => {
       io.to(roomId).emit("presence", await presenceList(roomId));
     }, 0);
+  });
+});
+
+// --- /worker namespace: the execution worker pushes results here ---
+// Authenticated with a shared secret so untrusted clients can't spoof results.
+const workerNsp = io.of("/worker");
+workerNsp.use((socket, next) => {
+  if (socket.handshake.auth?.secret === WORKER_SECRET) return next();
+  next(new Error("unauthorized"));
+});
+workerNsp.on("connection", (socket) => {
+  console.log("[socket.io] worker connected");
+  socket.on("result", (payload: { executionId: string }) => {
+    if (!payload?.executionId) return;
+    // Relay to whoever is watching this execution.
+    io.to(`exec:${payload.executionId}`).emit("execution:result", payload);
   });
 });
 

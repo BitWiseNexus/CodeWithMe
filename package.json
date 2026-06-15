@@ -4,8 +4,9 @@
   "private": true,
   "scripts": {
     "dev": "next dev",
-    "server": "tsx watch server/index.ts",
-    "dev:all": "concurrently -n next,server -c blue,green \"npm:dev\" \"npm:server\"",
+    "server": "tsx --env-file=.env.local watch server/index.ts",
+    "worker": "tsx --env-file=.env.local watch server/worker.ts",
+    "dev:all": "concurrently -n next,server,worker -c blue,green,magenta \"npm:dev\" \"npm:server\" \"npm:worker\"",
     "build": "next build",
     "start": "next start",
     "lint": "eslint"
@@ -14,6 +15,7 @@
     "@monaco-editor/react": "^4.7.0",
     "@supabase/ssr": "^0.12.0",
     "@supabase/supabase-js": "^2.108.2",
+    "ioredis": "^5.11.1",
     "monaco-editor": "^0.55.1",
     "next": "16.2.9",
     "react": "19.2.4",

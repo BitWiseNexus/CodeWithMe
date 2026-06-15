@@ -47,11 +47,44 @@ create index if not exists submissions_user_problem_idx
   on public.submissions (user_id, problem_id);
 
 -- ---------------------------------------------------------------------------
+-- Executions (one row per "Run") — queued, then filled in by the worker
+-- ---------------------------------------------------------------------------
+create table if not exists public.executions (
+  id          uuid primary key default gen_random_uuid(),
+  user_id     uuid not null references auth.users(id) on delete cascade,
+  problem_id  uuid references public.problems(id) on delete set null,
+  language    text not null check (language in ('python', 'cpp', 'javascript')),
+  code        text not null default '',
+  stdin       text not null default '',
+  status      text not null default 'queued'
+                check (status in ('queued', 'running', 'done', 'error')),
+  stdout      text not null default '',
+  stderr      text not null default '',
+  exit_code   int,
+  error       text,
+  created_at  timestamptz not null default now(),
+  finished_at timestamptz
+);
+
+create index if not exists executions_user_idx
+  on public.executions (user_id, created_at desc);
+
+-- ---------------------------------------------------------------------------
 -- Row Level Security
 -- ---------------------------------------------------------------------------
 alter table public.problems   enable row level security;
 alter table public.test_cases enable row level security;
 alter table public.submissions enable row level security;
+alter table public.executions enable row level security;
+
+-- Users can create and read their own executions. Updates come from the worker
+-- via the service-role key, which bypasses RLS — so no update policy needed.
+drop policy if exists "owners manage their executions" on public.executions;
+create policy "owners manage their executions"
+  on public.executions for all
+  to authenticated
+  using (auth.uid() = user_id)
+  with check (auth.uid() = user_id);
 
 -- Problems & sample test cases are readable by any authenticated user.
 drop policy if exists "problems are readable" on public.problems;
