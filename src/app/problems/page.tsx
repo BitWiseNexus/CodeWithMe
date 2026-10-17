@@ -2,7 +2,7 @@ import Link from "next/link";
 import { Header } from "@/components/Header";
 import { CreateRoomButton } from "@/components/CreateRoomButton";
 import { requireUser } from "@/lib/auth";
-import { createClient } from "@/lib/supabase/server";
+import { problemsCol, toProblem } from "@/lib/firebase/data";
 import type { Difficulty, Problem } from "@/lib/types";
 
 const DIFFICULTY_COLOR: Record<Difficulty, string> = {
@@ -13,11 +13,14 @@ const DIFFICULTY_COLOR: Record<Difficulty, string> = {
 
 export default async function ProblemsPage() {
   await requireUser();
-  const supabase = await createClient();
-  const { data: problems, error } = await supabase
-    .from("problems")
-    .select("id, slug, title, difficulty, created_at, description")
-    .order("created_at", { ascending: true });
+  let problems: Problem[] | null = null;
+  let error: Error | null = null;
+  try {
+    const snap = await problemsCol().orderBy("created_at", "asc").get();
+    problems = snap.docs.map(toProblem);
+  } catch (e) {
+    error = e instanceof Error ? e : new Error(String(e));
+  }
 
   return (
     <div className="flex min-h-screen flex-col">
@@ -30,19 +33,19 @@ export default async function ProblemsPage() {
 
         {error && (
           <p className="rounded-md bg-red-500/10 p-3 text-sm text-red-500">
-            Could not load problems: {error.message}. Did you run{" "}
-            <code>supabase/schema.sql</code>?
+            Could not load problems: {error.message}. Is Firestore set up
+            (see README)?
           </p>
         )}
 
         {problems && problems.length === 0 && (
           <p className="text-sm text-black/60 dark:text-white/60">
-            No problems yet. Run <code>supabase/schema.sql</code> to seed some.
+            No problems yet. Run <code>npm run seed</code> to seed some.
           </p>
         )}
 
         <ul className="divide-y divide-black/10 dark:divide-white/10 rounded-md border border-black/10 dark:border-white/10">
-          {(problems as Problem[] | null)?.map((p) => (
+          {problems?.map((p) => (
             <li key={p.id}>
               <Link
                 href={`/problems/${p.slug}`}

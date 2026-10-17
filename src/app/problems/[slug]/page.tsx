@@ -2,8 +2,16 @@ import { notFound } from "next/navigation";
 import Link from "next/link";
 import { Workspace } from "@/components/Workspace";
 import { requireUser } from "@/lib/auth";
-import { createClient } from "@/lib/supabase/server";
-import type { Language, Problem, Submission, TestCase } from "@/lib/types";
+import { db } from "@/lib/firebase/admin";
+import {
+  isValidDocId,
+  problemsCol,
+  submissionRef,
+  testCasesCol,
+  toProblem,
+  toTestCase,
+} from "@/lib/firebase/data";
+import { LANGUAGES, type Language } from "@/lib/types";
 
 export default async function ProblemPage({
   params,
@@ -12,35 +20,31 @@ export default async function ProblemPage({
 }) {
   const { slug } = await params;
   const user = await requireUser();
-  const supabase = await createClient();
-
-  const { data: problem } = await supabase
-    .from("problems")
-    .select("id, slug, title, description, difficulty, created_at")
-    .eq("slug", slug)
-    .maybeSingle<Problem>();
-
-  if (!problem) {
+  if (!isValidDocId(slug)) {
     notFound();
   }
 
-  const [{ data: samples }, { data: subs }] = await Promise.all([
-    supabase
-      .from("test_cases")
-      .select("id, problem_id, input, expected_output, is_sample, ordinal")
-      .eq("problem_id", problem.id)
-      .eq("is_sample", true)
-      .order("ordinal", { ascending: true }),
-    supabase
-      .from("submissions")
-      .select("language, code")
-      .eq("problem_id", problem.id)
-      .eq("user_id", user.id),
+  const problemDoc = await problemsCol().doc(slug).get();
+  if (!problemDoc.exists) {
+    notFound();
+  }
+  const problem = toProblem(problemDoc);
+
+  const [sampleSnap, subDocs] = await Promise.all([
+    // Only sample cases are ever shown; hidden ones stay server-side.
+    testCasesCol(problem.id).where("is_sample", "==", true).get(),
+    db.getAll(...LANGUAGES.map((l) => submissionRef(user.id, problem.id, l.value))),
   ]);
 
+  // Sorted in memory to avoid needing a composite index for a handful of docs.
+  const samples = sampleSnap.docs
+    .map((d) => toTestCase(d, problem.id))
+    .sort((a, b) => a.ordinal - b.ordinal);
+
   const savedCode: Partial<Record<Language, string>> = {};
-  for (const s of (subs as Pick<Submission, "language" | "code">[]) ?? []) {
-    savedCode[s.language] = s.code;
+  for (const s of subDocs) {
+    const data = s.data();
+    if (data) savedCode[data.language as Language] = data.code;
   }
 
   return (
@@ -63,11 +67,11 @@ export default async function ProblemPage({
             {problem.description}
           </article>
 
-          {(samples as TestCase[] | null)?.length ? (
+          {samples.length ? (
             <div className="mt-6">
               <h2 className="mb-2 text-sm font-semibold">Sample test cases</h2>
               <div className="space-y-3">
-                {(samples as TestCase[]).map((t, i) => (
+                {samples.map((t, i) => (
                   <div
                     key={t.id}
                     className="rounded-md border border-white/10 bg-black/30 p-3 text-xs"

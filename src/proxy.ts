@@ -1,5 +1,5 @@
 import type { NextRequest } from "next/server";
-import { updateSession } from "@/lib/supabase/proxy";
+import { updateSession } from "@/lib/firebase/proxy";
 
 // Next.js 16 renamed Middleware to Proxy. Same behaviour, runs before requests.
 export async function proxy(request: NextRequest) {

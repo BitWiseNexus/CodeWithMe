@@ -1,7 +1,71 @@
 "use client";
 
 import { useActionState } from "react";
-import { signIn, signUp, type AuthState } from "./actions";
+import { FirebaseError } from "firebase/app";
+import {
+  createUserWithEmailAndPassword,
+  signInWithEmailAndPassword,
+  signOut as signOutClient,
+} from "firebase/auth";
+import { getClientAuth } from "@/lib/firebase/client";
+import { createSession, type AuthState } from "./actions";
+
+const AUTH_ERRORS: Record<string, string> = {
+  "auth/invalid-credential": "Invalid email or password.",
+  "auth/invalid-email": "Please enter a valid email address.",
+  "auth/user-disabled": "This account has been disabled.",
+  "auth/email-already-in-use": "An account with this email already exists.",
+  "auth/weak-password": "Password must be at least 6 characters.",
+  "auth/too-many-requests": "Too many attempts. Please try again later.",
+  "auth/network-request-failed": "Network error. Check your connection.",
+};
+
+function authErrorMessage(e: unknown) {
+  if (e instanceof FirebaseError) return AUTH_ERRORS[e.code] ?? e.message;
+  return e instanceof Error ? e.message : "Something went wrong.";
+}
+
+/**
+ * Signs in (or up) with the Firebase client SDK, then hands the ID token to
+ * the server, which sets the session cookie and redirects.
+ */
+async function authenticate(
+  mode: "signIn" | "signUp",
+  formData: FormData
+): Promise<AuthState> {
+  const email = String(formData.get("email") ?? "").trim();
+  const password = String(formData.get("password") ?? "");
+  const redirectTo = String(formData.get("redirectTo") ?? "/problems");
+
+  if (!email || !password) {
+    return { error: "Email and password are required." };
+  }
+  if (mode === "signUp" && password.length < 6) {
+    return { error: "Password must be at least 6 characters." };
+  }
+
+  let idToken: string;
+  try {
+    const auth = await getClientAuth();
+    const credential =
+      mode === "signIn"
+        ? await signInWithEmailAndPassword(auth, email, password)
+        : await createUserWithEmailAndPassword(auth, email, password);
+    idToken = await credential.user.getIdToken();
+    // The server session cookie is the source of truth from here on.
+    await signOutClient(auth);
+  } catch (e) {
+    return { error: authErrorMessage(e) };
+  }
+
+  // Not inside try/catch: on success this throws Next's redirect signal.
+  return createSession(idToken, redirectTo);
+}
+
+const signIn = (_prev: AuthState, formData: FormData) =>
+  authenticate("signIn", formData);
+const signUp = (_prev: AuthState, formData: FormData) =>
+  authenticate("signUp", formData);
 
 export function AuthForm({ redirectTo }: { redirectTo: string }) {
   const [signInState, signInAction, signingIn] = useActionState<

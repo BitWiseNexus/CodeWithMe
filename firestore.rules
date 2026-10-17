@@ -1,0 +1,13 @@
+rules_version = '2';
+
+// CodeWithMe never reads or writes Firestore from the browser: every query
+// runs on the server through the Admin SDK (which bypasses these rules) after
+// verifying the user's session cookie. So lock the client API down completely.
+// This replaces the Row Level Security policies from the old Postgres schema.
+service cloud.firestore {
+  match /databases/{database}/documents {
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}

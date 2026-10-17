@@ -2,14 +2,13 @@ import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import Redis from "ioredis";
 import { io as ioClient } from "socket.io-client";
-import { createClient } from "@supabase/supabase-js";
+import { FieldValue } from "firebase-admin/firestore";
+import { getAdminDb } from "./firebaseAdmin";
 
 // --- config ---
 const REDIS_URL = process.env.REDIS_URL ?? "redis://localhost:6379";
 const SOCKET_URL = process.env.NEXT_PUBLIC_SOCKET_URL ?? "http://localhost:3001";
 const WORKER_SECRET = process.env.WORKER_SECRET ?? "dev-worker-secret";
-const SUPABASE_URL = process.env.NEXT_PUBLIC_SUPABASE_URL!;
-const SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY!;
 
 const EXEC_QUEUE = "codewithme:exec:jobs";
 const TIMEOUT_MS = 8_000;
@@ -29,16 +28,9 @@ const RUNTIMES = {
   javascript: { image: "node:20-alpine", file: "main.js", cmd: "node" },
 } as const;
 
-if (!SUPABASE_URL || !SERVICE_ROLE_KEY) {
-  console.error(
-    "[worker] Missing NEXT_PUBLIC_SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY"
-  );
-  process.exit(1);
-}
-
-const supabase = createClient(SUPABASE_URL, SERVICE_ROLE_KEY, {
-  auth: { persistSession: false },
-});
+// Admin SDK: writes results directly (clients have no Firestore access).
+const db = getAdminDb();
+const executionRef = (id: string) => db.collection("executions").doc(id);
 
 // Dedicated connection for blocking BRPOP.
 const redis = new Redis(REDIS_URL);
@@ -142,24 +134,25 @@ function runInSandbox(job: ExecJob): Promise<RunOutcome> {
 
 async function processJob(job: ExecJob) {
   console.log(`[worker] running ${job.executionId} (${job.language})`);
-  await supabase
-    .from("executions")
-    .update({ status: "running" })
-    .eq("id", job.executionId);
+  // DB writes are best-effort: a failed write must not stop the result from
+  // reaching the browser.
+  const record = (data: Record<string, unknown>) =>
+    executionRef(job.executionId)
+      .update(data)
+      .catch((e) => console.error(`[worker] db update failed for ${job.executionId}:`, e));
+
+  await record({ status: "running" });
 
   const outcome = await runInSandbox(job);
   const status = outcome.timedOut ? "error" : "done";
 
-  await supabase
-    .from("executions")
-    .update({
-      status,
-      stdout: outcome.stdout,
-      stderr: outcome.stderr,
-      exit_code: outcome.exitCode,
-      finished_at: new Date().toISOString(),
-    })
-    .eq("id", job.executionId);
+  await record({
+    status,
+    stdout: outcome.stdout,
+    stderr: outcome.stderr,
+    exit_code: outcome.exitCode,
+    finished_at: FieldValue.serverTimestamp(),
+  });
 
   socket.emit("result", {
     executionId: job.executionId,

@@ -3,7 +3,7 @@
 A real-time collaborative coding platform (a mini LeetCode + VS Code).
 
 - **Phase 1 — single-player foundation:** auth, a Monaco editor, problem
-  browsing, and saving code to Postgres.
+  browsing, and saving code to Firestore.
 - **Phase 2 — collaboration engine:** multiplayer rooms with Yjs + y-webrtc
   text sync (peer-to-peer) and a Socket.IO server for presence + live cursors.
 - **Phase 3 — execution sandbox:** click "Run" → job is queued in Redis → a
@@ -14,51 +14,69 @@ A real-time collaborative coding platform (a mini LeetCode + VS Code).
 
 - **Next.js 16** (App Router, TypeScript) — note: Next 16 renames `middleware`
   to **`proxy`** and makes `cookies()` async.
-- **Supabase** — Auth + Postgres (`@supabase/ssr` for cookie-based sessions).
+- **Firebase** — Auth (email/password) + Cloud Firestore. The browser signs in
+  with the Firebase client SDK, then the server exchanges the ID token for an
+  httpOnly **session cookie** (`firebase-admin`); all data access runs on the
+  server through the Admin SDK.
 - **Monaco Editor** (`@monaco-editor/react`) — Python, C++, JavaScript.
 - **Tailwind CSS v4**.
 
 ## Phase 1 features
 
-- Email/password sign-up & sign-in via Supabase Auth (Server Actions).
-- Session refresh + route protection in `src/proxy.ts`.
+- Email/password sign-up & sign-in via Firebase Auth + a server-set session
+  cookie.
+- Session verification + route protection in `src/proxy.ts`.
 - Problem list and problem detail pages (description + sample test cases).
 - Monaco editor with per-language buffers and starter code.
-- Save code to Postgres (`Ctrl/Cmd+S` or the Save button); one snapshot per
+- Save code to Firestore (`Ctrl/Cmd+S` or the Save button); one snapshot per
   `(user, problem, language)`.
 
 ## Getting started
 
-### 1. Create a Supabase project
+### 1. Create a Firebase project
 
-Go to [supabase.com](https://supabase.com), create a project, then copy the
-**Project URL** and **anon public key** from *Project Settings → API*.
+In the [Firebase console](https://console.firebase.google.com):
+
+1. Create a project.
+2. **Build → Authentication → Get started**, and enable the
+   **Email/Password** sign-in provider.
+3. **Build → Firestore Database → Create database** (any location, production
+   mode).
+4. **Project settings → General → Your apps → Add app → Web** to get the web
+   config (`apiKey`, `authDomain`, `projectId`).
+5. **Project settings → Service accounts → Generate new private key** to
+   download the Admin SDK JSON.
 
 ### 2. Configure environment variables
 
 ```bash
 cp .env.local.example .env.local
-# then edit .env.local with your Supabase URL and anon key
 ```
 
-### 2b. Add the service-role key (Phase 3)
-
-The execution worker writes results back to the DB past Row Level Security, so
-it needs the **service_role** key (Project Settings → API). Put it in
-`.env.local` as `SUPABASE_SERVICE_ROLE_KEY` — this is a **server-only secret**,
-never prefix it with `NEXT_PUBLIC`.
+Fill in the `NEXT_PUBLIC_FIREBASE_*` web config, and copy `project_id`,
+`client_email` and `private_key` from the service-account JSON into
+`FIREBASE_PROJECT_ID`, `FIREBASE_CLIENT_EMAIL` and `FIREBASE_PRIVATE_KEY`
+(keep the value in double quotes with its `\n` escapes). The service-account
+values are **server-only secrets** — never prefix them with `NEXT_PUBLIC`.
+(Alternatively, point `GOOGLE_APPLICATION_CREDENTIALS` at the JSON file.)
 
 ### 3. Set up the database
 
-Open the Supabase **SQL Editor** and run the contents of
-[`supabase/schema.sql`](supabase/schema.sql). This creates the `problems`,
-`test_cases`, and `submissions` tables, enables Row Level Security, and seeds a
-few starter problems.
+```bash
+npm run seed                                   # starter problems + sample cases
+npx firebase-tools deploy --only firestore:rules --project <your-project-id>
+```
 
-> By default Supabase requires email confirmation. For fast local testing you
-> can disable it under *Authentication → Sign In / Providers → Email →
-> "Confirm email"*, or use the confirmation link (handled by
-> `/auth/callback`).
+The seed is idempotent. The rules in [`firestore.rules`](firestore.rules) deny
+all direct client access — the app only touches Firestore from the server via
+the Admin SDK, after verifying the session cookie. Data layout:
+
+```
+problems/{slug}                            title, description, difficulty, created_at
+problems/{slug}/test_cases/{id}            input, expected_output, is_sample, ordinal
+submissions/{uid}_{problemId}_{language}   saved code (one per triple)
+executions/{autoId}                        one per "Run", completed by the worker
+```
 
 ### 4. Start Redis + sandbox images (Phase 3)
 
@@ -114,10 +132,15 @@ server/
   index.ts                      # Socket.IO presence/cursors + /worker relay (:3001)
   signaling.ts                  # self-hosted y-webrtc signaling relay (:4444)
   worker.ts                     # drains Redis queue, runs code in Docker sandbox
+  firebaseAdmin.ts              # Admin SDK init for worker + seed script
+scripts/seed.ts                 # seeds Firestore with starter problems
 src/
-  proxy.ts                      # Next 16 "middleware": session refresh + guards
+  proxy.ts                      # Next 16 "middleware": session check + guards
   lib/
-    supabase/{client,server,proxy}.ts   # Supabase clients per context
+    firebase/admin.ts           # Admin SDK (auth + Firestore), server-only
+    firebase/client.ts          # client SDK, used only to sign in
+    firebase/proxy.ts           # session-cookie verification for proxy.ts
+    firebase/data.ts            # Firestore collection refs + converters
     auth.ts                     # requireUser() / getUser() DAL helpers
     redis.ts                    # shared ioredis connection (route handlers)
     types.ts                    # shared types, language list, starter code
@@ -131,11 +154,10 @@ src/
     Header.tsx                  # nav + sign out
   app/
     api/run/route.ts            # POST: insert execution + enqueue job
-    login/                      # auth page, form, server actions
-    auth/callback/route.ts      # email-confirmation code exchange
+    login/                      # auth page, form, session-cookie actions
     problems/                   # list + [slug] detail with editor
     room/[id]/                  # collaborative session page
-supabase/schema.sql             # DB schema + seed data
+firestore.rules                 # deny-all client rules (server-only access)
 ```
 
 ## How the realtime layer fits together
@@ -159,7 +181,7 @@ Browser ──POST /api/run──▶ Next route ──LPUSH──▶ Redis queue
                                                      │ BRPOP
                                                      ▼
                               Worker ──docker run (sandbox)──▶ result
-                                 │ write to DB (service role)
+                                 │ write to Firestore (Admin SDK)
                                  │ emit "result" to /worker namespace
                                  ▼
         Browser ◀──"execution:result"── Socket.IO server (exec:<id> room)
@@ -173,7 +195,7 @@ filesystem is never mounted.
 
 ## Milestone status
 
-✅ **Phase 1** — log in, pick a problem, edit in Monaco, save to Postgres.
+✅ **Phase 1** — log in, pick a problem, edit in Monaco, save to Firestore.
 ✅ **Phase 2** — multiplayer rooms: Google-Docs-style text sync with visible
 remote cursors and no text conflicts.
 ✅ **Phase 3** — run untrusted code safely in a Docker sandbox via a Redis

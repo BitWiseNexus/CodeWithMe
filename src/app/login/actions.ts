@@ -1,63 +1,76 @@
 "use server";
 
+import { cookies } from "next/headers";
 import { redirect } from "next/navigation";
-import { createClient } from "@/lib/supabase/server";
+import { adminAuth, SESSION_COOKIE, SESSION_MAX_AGE_MS } from "@/lib/firebase/admin";
 
 export type AuthState = { error: string } | undefined;
 
-function readCredentials(formData: FormData) {
-  const email = String(formData.get("email") ?? "").trim();
-  const password = String(formData.get("password") ?? "");
-  const redirectTo = String(formData.get("redirectTo") ?? "/problems");
-  return { email, password, redirectTo };
+/** Only allow same-site relative redirects (no `//evil.com` or absolute URLs). */
+function safeRedirect(target: string) {
+  return target.startsWith("/") && !target.startsWith("//") && !target.startsWith("/\\")
+    ? target
+    : "/problems";
 }
 
-export async function signIn(
-  _prev: AuthState,
-  formData: FormData
+/**
+ * Exchanges a freshly minted Firebase ID token (from the client SDK sign-in /
+ * sign-up) for an httpOnly session cookie, then redirects.
+ */
+export async function createSession(
+  idToken: string,
+  redirectTo: string
 ): Promise<AuthState> {
-  const { email, password, redirectTo } = readCredentials(formData);
-  if (!email || !password) {
-    return { error: "Email and password are required." };
+  if (typeof idToken !== "string" || !idToken) {
+    return { error: "Missing credentials." };
   }
 
-  const supabase = await createClient();
-  const { error } = await supabase.auth.signInWithPassword({ email, password });
-  if (error) {
-    return { error: error.message };
+  let authTime: number;
+  try {
+    ({ auth_time: authTime } = await adminAuth.verifyIdToken(idToken, true));
+  } catch {
+    return { error: "Could not verify your sign-in. Please try again." };
   }
 
-  redirect(redirectTo || "/problems");
-}
-
-export async function signUp(
-  _prev: AuthState,
-  formData: FormData
-): Promise<AuthState> {
-  const { email, password } = readCredentials(formData);
-  if (!email || !password) {
-    return { error: "Email and password are required." };
-  }
-  if (password.length < 6) {
-    return { error: "Password must be at least 6 characters." };
+  // Only create a session from a recent sign-in, per Firebase's guidance.
+  if (Date.now() / 1000 - authTime > 5 * 60) {
+    return { error: "Sign-in expired. Please try again." };
   }
 
-  const supabase = await createClient();
-  const { data, error } = await supabase.auth.signUp({ email, password });
-  if (error) {
-    return { error: error.message };
+  let sessionCookie: string;
+  try {
+    sessionCookie = await adminAuth.createSessionCookie(idToken, {
+      expiresIn: SESSION_MAX_AGE_MS,
+    });
+  } catch {
+    return { error: "Could not start your session. Please try again." };
   }
 
-  // If email confirmation is enabled, there is no active session yet.
-  if (!data.session) {
-    return { error: "Check your email to confirm your account, then sign in." };
-  }
+  (await cookies()).set(SESSION_COOKIE, sessionCookie, {
+    maxAge: SESSION_MAX_AGE_MS / 1000,
+    httpOnly: true,
+    secure: process.env.NODE_ENV === "production",
+    sameSite: "lax",
+    path: "/",
+  });
 
-  redirect("/problems");
+  redirect(safeRedirect(String(redirectTo ?? "")));
 }
 
 export async function signOut() {
-  const supabase = await createClient();
-  await supabase.auth.signOut();
+  const cookieStore = await cookies();
+  const sessionCookie = cookieStore.get(SESSION_COOKIE)?.value;
+  cookieStore.delete(SESSION_COOKIE);
+
+  if (sessionCookie) {
+    try {
+      // Revoke refresh tokens so the session is invalid everywhere.
+      const { uid } = await adminAuth.verifySessionCookie(sessionCookie);
+      await adminAuth.revokeRefreshTokens(uid);
+    } catch {
+      // Cookie was already invalid — nothing to revoke.
+    }
+  }
+
   redirect("/login");
 }
