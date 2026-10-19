@@ -2,6 +2,7 @@ import { createServer } from "node:http";
 import { Server as SocketIOServer } from "socket.io";
 import { isValidRoomId, roomChannel, type CursorPayload, type RoomUser } from "@/lib/collab";
 import { execRoom, type ExecResult } from "@/lib/exec";
+import type { SubmissionResult } from "@/lib/judge";
 import { requireWorkerSecret } from "./config";
 import { startSignalingServer } from "./signaling";
 
@@ -35,15 +36,17 @@ async function presenceList(channel: string): Promise<RoomUser[]> {
 }
 
 /**
- * Recently finished results. The browser only learns an execution id after
- * the job is queued, so a fast result can arrive before its `watch` — this
- * cache lets `watch` replay it instead of losing it.
+ * Recently finished results (runs and submissions). The browser only learns
+ * a job id after the job is queued, so a fast result can arrive before its
+ * `watch` — this cache lets `watch` replay it instead of losing it.
  */
-const recentResults = new Map<string, ExecResult>();
+const recentResults = new Map<string, { event: string; payload: unknown }>();
 
-function rememberResult(result: ExecResult) {
-  recentResults.set(result.executionId, result);
-  setTimeout(() => recentResults.delete(result.executionId), RESULT_TTL_MS).unref();
+/** Sends a finished job's result to its watchers and remembers it briefly. */
+function deliver(jobId: string, event: string, payload: unknown) {
+  recentResults.set(jobId, { event, payload });
+  setTimeout(() => recentResults.delete(jobId), RESULT_TTL_MS).unref();
+  io.to(execRoom(jobId)).emit(event, payload);
 }
 
 io.on("connection", (socket) => {
@@ -79,14 +82,15 @@ io.on("connection", (socket) => {
     });
   });
 
-  // Client subscribes to results for a specific execution it kicked off.
+  // Client subscribes to the result of a run or submission it kicked off.
+  // (The field is called executionId for both; it's just the job id.)
   socket.on("watch", (payload: { executionId?: unknown }) => {
-    const executionId = payload?.executionId;
-    if (typeof executionId !== "string" || !EXECUTION_ID.test(executionId)) return;
-    socket.join(execRoom(executionId));
+    const jobId = payload?.executionId;
+    if (typeof jobId !== "string" || !EXECUTION_ID.test(jobId)) return;
+    socket.join(execRoom(jobId));
 
-    const finished = recentResults.get(executionId);
-    if (finished) socket.emit("execution:result", finished);
+    const finished = recentResults.get(jobId);
+    if (finished) socket.emit(finished.event, finished.payload);
   });
 
   socket.on("disconnecting", () => {
@@ -109,11 +113,14 @@ workerNsp.use((socket, next) => {
 });
 workerNsp.on("connection", (socket) => {
   console.log("[socket.io] worker connected");
+  // Relay to whoever is watching that job.
   socket.on("result", (result: ExecResult) => {
     if (typeof result?.executionId !== "string") return;
-    rememberResult(result);
-    // Relay to whoever is watching this execution.
-    io.to(execRoom(result.executionId)).emit("execution:result", result);
+    deliver(result.executionId, "execution:result", result);
+  });
+  socket.on("submission", (result: SubmissionResult) => {
+    if (typeof result?.submissionId !== "string") return;
+    deliver(result.submissionId, "submission:result", result);
   });
 });
 

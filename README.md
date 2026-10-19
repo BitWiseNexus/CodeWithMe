@@ -9,6 +9,10 @@ A real-time collaborative coding platform (a mini LeetCode + VS Code).
 - **Phase 3 — execution sandbox:** click "Run" → job is queued in Redis → a
   worker executes the code in a locked-down Docker container → stdout/stderr
   stream back to the browser over Socket.IO. (Python, JavaScript and C++.)
+- **Phase 5 — judge:** click "Submit" → the worker runs your code against the
+  problem's sample and hidden tests → a verdict (Accepted, Wrong Answer, Time /
+  Memory Limit, Runtime Error, Compilation Error), submission history and ✓
+  solved marks.
 
 ## Tech stack
 
@@ -63,19 +67,29 @@ values are **server-only secrets** — never prefix them with `NEXT_PUBLIC`.
 ### 3. Set up the database
 
 ```bash
-npm run seed                                   # starter problems + sample cases
-npx firebase-tools deploy --only firestore:rules --project <your-project-id>
+npm run seed                 # problems, starter code, sample + hidden tests
+npx firebase-tools deploy --only firestore --project <your-project-id>   # rules + indexes
 ```
 
-The seed is idempotent. The rules in [`firestore.rules`](firestore.rules) deny
-all direct client access — the app only touches Firestore from the server via
-the Admin SDK, after verifying the session cookie. Data layout:
+The seed **syncs**: re-running it updates the problems (statement, format,
+starter code) and replaces their tests. Problems live in
+[`scripts/problems.ts`](scripts/problems.ts); expected outputs come from the
+reference solutions there, not hand-typed values.
+
+The rules in [`firestore.rules`](firestore.rules) deny all direct client access
+— the app only touches Firestore from the server via the Admin SDK, after
+verifying the session cookie. [`firestore.indexes.json`](firestore.indexes.json)
+holds the index for the submission history (until it's deployed, the history
+query falls back to sorting in memory). Data layout:
 
 ```
-problems/{slug}                        title, description, difficulty, created_at
+problems/{slug}                        statement, input/output format, constraints,
+                                       time_limit_ms, comparator, starter_code
 problems/{slug}/test_cases/{id}        input, expected_output, is_sample, ordinal
 drafts/{uid}_{problemId}_{language}    saved code (one per triple)
 executions/{autoId}                    one per "Run", completed by the worker
+submissions/{autoId}                   one per "Submit": verdict, passed/total, failed test
+users/{uid}/progress/{problemId}       attempted | solved
 ```
 
 Optional but recommended: let Firestore delete old runs automatically. Each
@@ -141,21 +155,37 @@ Open [http://localhost:3000](http://localhost:3000). You'll be redirected to
 5. Each user can run 10 times per minute. If the result doesn't arrive over the
    socket, the page falls back to polling and gives up with an error after 60s.
 
+### Try the judge
+
+1. Open a problem. The starter code already reads the input — fill in the
+   function.
+2. Click **Submit** (or Ctrl/Cmd+Shift+Enter). The verdict appears in the
+   console's **verdict** tab: e.g. *Accepted — 10 / 10 tests passed*.
+3. A failed **sample** test shows its input, the expected output and yours; a
+   failed **hidden** test only shows its number.
+4. The **Submissions** tab lists your attempts; *Open in editor* loads old code.
+   Solved problems get a ✓ on the problem list. Limit: 6 submissions/minute.
+
 ## Project structure
 
 ```
 server/
   index.ts                      # Socket.IO presence/cursors + /worker relay (:3001)
   signaling.ts                  # self-hosted y-webrtc signaling relay (:4444)
-  worker.ts                     # drains Redis queue → sandbox → Firestore + result
-  sandbox.ts                    # docker run flags, output caps, orphan cleanup
+  worker.ts                     # drains Redis queue: runs + submissions → results
+  sandbox.ts                    # docker run flags, run + judge runner scripts, caps
+  judge.ts                      # samples then hidden tests → verdict (pure, tested)
   config.ts                     # WORKER_SECRET (required in production)
   firebaseAdmin.ts              # Admin SDK init for worker + seed script
-scripts/seed.ts                 # seeds Firestore with starter problems
+sandbox/cpp/Dockerfile          # C++ image (g++ + precompiled <bits/stdc++.h>)
+scripts/problems.ts             # problem definitions + tests (reference solutions)
+scripts/seed.ts                 # syncs problems.ts into Firestore
 src/
   proxy.ts                      # Next 16 "middleware": session check + guards
   lib/
-    db/                         # ALL Firestore access: problems, drafts, executions
+    db/                         # ALL Firestore access: problems, drafts,
+                                #   executions, submissions, progress
+    judge.ts                    # verdicts, output comparators, result types
     firebase/admin.ts           # Admin SDK (auth + Firestore), server-only
     firebase/client.ts          # client SDK, used only to sign in
     firebase/proxy.ts           # session-cookie verification for proxy.ts
@@ -167,18 +197,24 @@ src/
     exec.ts                     # job/result types, runnable languages, limits
                                 #   (collab.ts + exec.ts are also imported by server/)
   components/
-    CodeEditor.tsx              # Monaco wrapper (single-player)
-    Workspace.tsx               # editor + save + Run console (client)
+    CodeEditor.tsx              # Monaco wrapper (single-player) + shortcuts
+    Workspace.tsx               # editor, Save / Run / Submit, output + verdict
+    ProblemShell.tsx            # problem page: Description/Submissions + editor
+    VerdictView.tsx             # renders a submission's verdict
+    Markdown.tsx                # problem statements (no raw HTML)
     CollaborativeEditor.tsx     # Yjs+y-webrtc text sync + Socket.IO cursors
     CreateRoomButton.tsx        # spins up a new /room/<id>
     Header.tsx                  # nav + sign out
   app/
     api/run/route.ts            # POST: rate-limit, insert execution, enqueue job
     api/executions/[id]/        # GET: run status/result (polling fallback)
+    api/submit/route.ts         # POST: rate-limit, insert submission, enqueue job
+    api/submissions/[id]/       # GET: verdict + code (owner only)
     login/                      # auth page, form, session-cookie actions
     problems/                   # list + [slug] detail with editor
     room/[id]/                  # collaborative session page
 firestore.rules                 # deny-all client rules (server-only access)
+firestore.indexes.json          # index for the submission history query
 ```
 
 ## How the realtime layer fits together
@@ -225,6 +261,24 @@ don't.
 The worker sends the result before writing it to Firestore, and database
 writes time out after 10s, so a Firestore problem never blocks results.
 
+## How the judge works
+
+A submission runs in the same locked-down containers, through a small shell
+runner (`judgeScript` in `server/sandbox.ts`):
+
+- The container receives the code and the test **inputs** only. It runs the
+  program once per test under the problem's time limit and reports each run's
+  output, exit code and time. **Expected outputs never enter the container** —
+  the worker compares them (`tokens`, `exact` or `float:<eps>` comparators).
+- **Sample tests run first, in their own container**, then hidden tests in a
+  second one. A failed sample shows the program's output to the user, so that
+  container never holds hidden inputs a hostile program could print.
+- The first failing test decides the verdict: 137 + time used → TLE, 137 early
+  or `bad_alloc`/`MemoryError` → MLE, other non-zero exits → RE, output over
+  1 MB → RE, wrong output → WA. C++ compile errors → CE with the compiler output.
+- The worker also times each test on its own clock, so a program that kills
+  the runner to dodge `timeout` still gets TLE.
+
 ## Milestone status
 
 ✅ **Phase 1** — log in, pick a problem, edit in Monaco, save to Firestore.
@@ -232,8 +286,12 @@ writes time out after 10s, so a Firestore problem never blocks results.
 remote cursors and no text conflicts.
 ✅ **Phase 3** — run untrusted code safely in a Docker sandbox via a Redis
 queue + worker, with output streamed back over Socket.IO.
+✅ **Phase 4** — stabilised: no stuck runs, rate limits, hardened sandbox,
+data-access layer, tests + CI, C++.
+🟡 **Phase 5** — judge with verdicts, hidden tests, history and solved marks.
+Still to do: reliable queue + concurrency, admin problem editor, autosave.
 
-## Next (Phase 4+)
+## Next
 
-Contests, code replay, and the AI features (reviewer, hints, plagiarism
-detection) from the roadmap.
+Deployment, collaboration v2, contests, AI hints/review and plagiarism
+detection — see the roadmap.

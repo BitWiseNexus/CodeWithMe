@@ -2,6 +2,7 @@ import "server-only";
 import type { DocumentSnapshot } from "firebase-admin/firestore";
 import { problemsCol, testCasesCol, toIso } from "@/lib/db/collections";
 import { isValidDocId } from "@/lib/db/ids";
+import { DEFAULT_COMPARATOR, DEFAULT_TIME_LIMIT_MS } from "@/lib/judge";
 import type { Problem, TestCase } from "@/lib/types";
 
 function toProblem(doc: DocumentSnapshot): Problem {
@@ -13,6 +14,12 @@ function toProblem(doc: DocumentSnapshot): Problem {
     description: d.description ?? "",
     difficulty: d.difficulty,
     created_at: toIso(d.created_at),
+    input_format: d.input_format ?? "",
+    output_format: d.output_format ?? "",
+    constraints: d.constraints ?? "",
+    time_limit_ms: d.time_limit_ms ?? DEFAULT_TIME_LIMIT_MS,
+    comparator: d.comparator ?? DEFAULT_COMPARATOR,
+    starter_code: d.starter_code ?? {},
   };
 }
 

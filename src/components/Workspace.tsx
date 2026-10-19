@@ -1,28 +1,46 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState, useTransition } from "react";
+import {
+  useCallback,
+  useEffect,
+  useImperativeHandle,
+  useRef,
+  useState,
+  useTransition,
+  type Ref,
+} from "react";
 import { io, type Socket } from "socket.io-client";
 import { CodeEditor } from "@/components/CodeEditor";
+import { VerdictView, type SubmitState } from "@/components/VerdictView";
 import { saveCode } from "@/app/problems/[slug]/actions";
 import { LANGUAGES, STARTER_CODE, type Language } from "@/lib/types";
-import { isRunnable, type ExecResult, type ExecStatus } from "@/lib/exec";
+import { isRunnable, type ExecResult } from "@/lib/exec";
+import type { SubmissionResult } from "@/lib/judge";
 
-type SavedCode = Partial<Record<Language, string>>;
+type CodeByLanguage = Partial<Record<Language, string>>;
 
 type RunState =
   | { phase: "idle" }
   | { phase: "queued" | "running" }
   | { phase: "done"; result: ExecResult };
 
+/** The run or submission we're waiting for. */
+type Job = { kind: "run" | "submit"; id: string };
+
+/** Lets the problem page load old code (e.g. from the submission history). */
+export interface WorkspaceHandle {
+  loadCode: (language: Language, code: string) => void;
+}
+
 /** If the Socket.IO result hasn't arrived by then, start polling the API. */
 const POLL_AFTER_MS = 10_000;
 const POLL_EVERY_MS = 5_000;
-/** Stop waiting entirely (worker likely offline). */
-const GIVE_UP_AFTER_MS = 60_000;
+/** Stop waiting entirely (worker likely offline). Judging takes longer. */
+const GIVE_UP_AFTER_MS = { run: 60_000, submit: 180_000 };
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
-const errorResult = (message: string, executionId = ""): ExecResult => ({
+const runError = (message: string, executionId = ""): ExecResult => ({
   executionId,
   status: "error",
   stdout: "",
@@ -30,63 +48,127 @@ const errorResult = (message: string, executionId = ""): ExecResult => ({
   exitCode: null,
 });
 
+const submitError = (message: string, submissionId = ""): SubmissionResult => ({
+  submissionId,
+  status: "error",
+  verdict: null,
+  passed: 0,
+  total: 0,
+  timeMs: null,
+  error: message,
+});
+
+/** POST JSON and return the parsed body — without assuming the reply is JSON. */
+async function postJson(url: string, body: unknown) {
+  const res = await fetch(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  const data = (await res.json().catch(() => ({}))) as Record<string, unknown>;
+  return { res, data };
+}
+
 export function Workspace({
   problemId,
   initialLanguage,
   savedCode,
+  starterCode,
   socketUrl,
+  onSubmissionFinished,
+  ref,
 }: {
   problemId: string;
   initialLanguage: Language;
   /** Previously saved code keyed by language (from the DB). */
-  savedCode: SavedCode;
+  savedCode: CodeByLanguage;
+  /** This problem's starter code (falls back to a generic template). */
+  starterCode: CodeByLanguage;
   socketUrl: string;
+  /** Called after a verdict arrives (e.g. to refresh the history list). */
+  onSubmissionFinished?: () => void;
+  ref?: Ref<WorkspaceHandle>;
 }) {
-  const [language, setLanguage] = useState<Language>(initialLanguage);
+  const starterFor = useCallback(
+    (l: Language) => starterCode[l] ?? STARTER_CODE[l],
+    [starterCode]
+  );
 
+  const [language, setLanguage] = useState<Language>(initialLanguage);
   // Per-language buffer so switching languages doesn't lose work.
   const [buffers, setBuffers] = useState<Record<Language, string>>(() => ({
-    python: savedCode.python ?? STARTER_CODE.python,
-    cpp: savedCode.cpp ?? STARTER_CODE.cpp,
-    javascript: savedCode.javascript ?? STARTER_CODE.javascript,
+    python: savedCode.python ?? starterFor("python"),
+    cpp: savedCode.cpp ?? starterFor("cpp"),
+    javascript: savedCode.javascript ?? starterFor("javascript"),
   }));
 
   const [status, setStatus] = useState<string>("");
   const [stdin, setStdin] = useState("");
   const [run, setRun] = useState<RunState>({ phase: "idle" });
+  const [submit, setSubmit] = useState<SubmitState>({ phase: "idle" });
+  const [panel, setPanel] = useState<"output" | "verdict">("output");
   const [isPending, startTransition] = useTransition();
   /** Languages with edits that haven't been saved yet. */
   const dirtyRef = useRef<Set<Language>>(new Set());
   const socketRef = useRef<Socket | null>(null);
-  /** The execution we're waiting for (null when idle). */
-  const execIdRef = useRef<string | null>(null);
+  const jobRef = useRef<Job | null>(null);
+  const onFinishedRef = useRef(onSubmissionFinished);
+  useEffect(() => {
+    onFinishedRef.current = onSubmissionFinished;
+  }, [onSubmissionFinished]);
 
   const code = buffers[language];
-  const running = run.phase === "queued" || run.phase === "running";
+  const busy =
+    run.phase === "queued" || run.phase === "running" ||
+    submit.phase === "queued" || submit.phase === "running";
   const canRun = isRunnable(language);
 
   const finishRun = useCallback((result: ExecResult) => {
-    execIdRef.current = null; // also stops any polling loop
+    jobRef.current = null; // also stops any polling loop
     setRun({ phase: "done", result });
   }, []);
 
-  // Persistent socket connection to receive execution results.
+  const finishSubmit = useCallback((result: SubmissionResult) => {
+    jobRef.current = null;
+    setSubmit({ phase: "done", result });
+    onFinishedRef.current?.();
+  }, []);
+
+  useImperativeHandle(
+    ref,
+    () => ({
+      loadCode(l, c) {
+        setLanguage(l);
+        setBuffers((prev) => ({ ...prev, [l]: c }));
+        dirtyRef.current.add(l);
+        setStatus("Loaded from a submission — unsaved");
+      },
+    }),
+    []
+  );
+
+  // Persistent socket connection to receive run results and verdicts.
   useEffect(() => {
     const socket = io(socketUrl, { transports: ["websocket"] });
     socketRef.current = socket;
     socket.on("execution:result", (result: ExecResult) => {
-      if (result.executionId === execIdRef.current) finishRun(result);
+      const job = jobRef.current;
+      if (job?.kind === "run" && job.id === result.executionId) finishRun(result);
+    });
+    socket.on("submission:result", (result: SubmissionResult) => {
+      const job = jobRef.current;
+      if (job?.kind === "submit" && job.id === result.submissionId) finishSubmit(result);
     });
     // Socket.IO rooms don't survive a reconnect: watch again. The server
     // replays the result if it finished while we were disconnected.
     socket.on("connect", () => {
-      if (execIdRef.current) socket.emit("watch", { executionId: execIdRef.current });
+      if (jobRef.current) socket.emit("watch", { executionId: jobRef.current.id });
     });
     return () => {
       socket.disconnect();
-      execIdRef.current = null; // stop polling after unmount
+      jobRef.current = null; // stop polling after unmount
     };
-  }, [socketUrl, finishRun]);
+  }, [socketUrl, finishRun, finishSubmit]);
 
   // Warn before leaving the page with unsaved edits.
   useEffect(() => {
@@ -99,39 +181,48 @@ export function Workspace({
 
   /**
    * Fallback when the socket result doesn't arrive: poll the API until the
-   * run finishes, another run starts, the component unmounts, or we give up.
+   * job finishes, another job starts, the component unmounts, or we give up.
    */
-  const pollExecution = useCallback(
-    async (executionId: string) => {
+  const pollJob = useCallback(
+    async (job: Job) => {
       const startedAt = Date.now();
+      const url = job.kind === "run" ? `/api/executions/${job.id}` : `/api/submissions/${job.id}`;
       await sleep(POLL_AFTER_MS);
 
-      while (execIdRef.current === executionId) {
-        if (Date.now() - startedAt > GIVE_UP_AFTER_MS) {
-          finishRun(
-            errorResult(
-              "No result yet — the code runner may be offline. Please try again later.",
-              executionId
-            )
-          );
+      while (jobRef.current?.id === job.id) {
+        if (Date.now() - startedAt > GIVE_UP_AFTER_MS[job.kind]) {
+          const message = "No result yet — the code runner may be offline. Please try again later.";
+          if (job.kind === "run") finishRun(runError(message, job.id));
+          else finishSubmit(submitError(message, job.id));
           return;
         }
         try {
-          const res = await fetch(`/api/executions/${executionId}`, { cache: "no-store" });
+          const res = await fetch(url, { cache: "no-store" });
           if (res.ok) {
-            const data = (await res.json()) as { status: ExecStatus; result: ExecResult | null };
-            if (data.result && execIdRef.current === executionId) {
-              finishRun(data.result);
+            const data = (await res.json()) as { result: ExecResult | SubmissionResult | null };
+            if (data.result && jobRef.current?.id === job.id) {
+              if (job.kind === "run") finishRun(data.result as ExecResult);
+              else finishSubmit(data.result as SubmissionResult);
               return;
             }
           }
         } catch {
-          // Network blip — keep trying until GIVE_UP_AFTER_MS.
+          // Network blip — keep trying until we give up.
         }
         await sleep(POLL_EVERY_MS);
       }
     },
-    [finishRun]
+    [finishRun, finishSubmit]
+  );
+
+  /** Starts waiting for a queued job's result. */
+  const watchJob = useCallback(
+    (job: Job) => {
+      jobRef.current = job;
+      socketRef.current?.emit("watch", { executionId: job.id });
+      void pollJob(job);
+    },
+    [pollJob]
   );
 
   const handleChange = useCallback(
@@ -155,71 +246,93 @@ export function Workspace({
     });
   }, [problemId, language, code]);
 
+  const handleReset = useCallback(() => {
+    if (!window.confirm("Replace your code with the starter code for this language?")) return;
+    setBuffers((prev) => ({ ...prev, [language]: starterFor(language) }));
+    dirtyRef.current.add(language);
+    setStatus("Reset to starter code — unsaved");
+  }, [language, starterFor]);
+
   const handleRun = useCallback(async () => {
-    if (!isRunnable(language) || running) return;
+    if (!isRunnable(language) || busy) return;
+    setPanel("output");
     setRun({ phase: "queued" });
-
-    let res: Response;
     try {
-      res = await fetch("/api/run", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ language, code, stdin, problemId }),
-      });
+      const { res, data } = await postJson("/api/run", { language, code, stdin, problemId });
+      if (!res.ok || typeof data.executionId !== "string") {
+        finishRun(runError((data.error as string) ?? `Failed to queue execution (HTTP ${res.status})`));
+        return;
+      }
+      setRun({ phase: "running" });
+      watchJob({ kind: "run", id: data.executionId });
     } catch (e) {
-      finishRun(errorResult(e instanceof Error ? e.message : "Network error"));
-      return;
+      finishRun(runError(e instanceof Error ? e.message : "Network error"));
     }
+  }, [language, code, stdin, problemId, busy, finishRun, watchJob]);
 
-    // Don't assume JSON: a proxy or crash page may return HTML.
-    const data = (await res.json().catch(() => ({}))) as {
-      executionId?: string;
-      error?: string;
-    };
-    if (!res.ok || typeof data.executionId !== "string") {
-      finishRun(errorResult(data.error ?? `Failed to queue execution (HTTP ${res.status})`));
-      return;
+  const handleSubmit = useCallback(async () => {
+    if (!isRunnable(language) || busy) return;
+    setPanel("verdict");
+    setSubmit({ phase: "queued" });
+    try {
+      const { res, data } = await postJson("/api/submit", { language, code, problemId });
+      if (!res.ok || typeof data.submissionId !== "string") {
+        finishSubmit(submitError((data.error as string) ?? `Failed to submit (HTTP ${res.status})`));
+        return;
+      }
+      setSubmit({ phase: "running" });
+      watchJob({ kind: "submit", id: data.submissionId });
+    } catch (e) {
+      finishSubmit(submitError(e instanceof Error ? e.message : "Network error"));
     }
+  }, [language, code, problemId, busy, finishSubmit, watchJob]);
 
-    execIdRef.current = data.executionId;
-    setRun({ phase: "running" });
-    socketRef.current?.emit("watch", { executionId: data.executionId });
-    void pollExecution(data.executionId);
-  }, [language, code, stdin, problemId, running, finishRun, pollExecution]);
-
-  // Ctrl/Cmd+S to save, Ctrl/Cmd+Enter to run — when focus is outside the
-  // editor (e.g. the stdin box). Inside Monaco, CodeEditor handles them.
+  // Shortcuts when focus is outside the editor (e.g. the stdin box). Inside
+  // Monaco, CodeEditor registers the same keys.
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "s") {
+      if (!(e.ctrlKey || e.metaKey)) return;
+      if (e.key.toLowerCase() === "s") {
         e.preventDefault();
         handleSave();
-      }
-      if ((e.ctrlKey || e.metaKey) && e.key === "Enter") {
+      } else if (e.key === "Enter") {
         e.preventDefault();
-        handleRun();
+        if (e.shiftKey) handleSubmit();
+        else handleRun();
       }
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [handleSave, handleRun]);
+  }, [handleSave, handleRun, handleSubmit]);
+
+  const tabClass = (active: boolean) =>
+    `text-xs uppercase tracking-wide ${active ? "text-white" : "text-white/40 hover:text-white/70"}`;
 
   return (
     <div className="flex h-full flex-col">
       <div className="flex items-center justify-between gap-3 border-b border-white/10 bg-[#1e1e1e] px-3 py-2">
-        <select
-          value={language}
-          onChange={(e) => setLanguage(e.target.value as Language)}
-          className="rounded-md border border-white/15 bg-[#2a2a2a] px-2 py-1 text-sm text-white outline-none"
-        >
-          {LANGUAGES.map((l) => (
-            <option key={l.value} value={l.value}>
-              {l.label}
-            </option>
-          ))}
-        </select>
+        <div className="flex items-center gap-2">
+          <select
+            value={language}
+            onChange={(e) => setLanguage(e.target.value as Language)}
+            className="rounded-md border border-white/15 bg-[#2a2a2a] px-2 py-1 text-sm text-white outline-none"
+          >
+            {LANGUAGES.map((l) => (
+              <option key={l.value} value={l.value}>
+                {l.label}
+              </option>
+            ))}
+          </select>
+          <button
+            onClick={handleReset}
+            title="Replace your code with the starter code"
+            className="rounded-md px-2 py-1 text-xs text-white/50 hover:bg-white/10 hover:text-white"
+          >
+            Reset
+          </button>
+        </div>
 
-        <div className="flex items-center gap-3">
+        <div className="flex items-center gap-2">
           <span className="text-xs text-white/50">{status}</span>
           <button
             onClick={handleSave}
@@ -230,11 +343,19 @@ export function Workspace({
           </button>
           <button
             onClick={handleRun}
-            disabled={running || !canRun}
-            title={canRun ? "Run (Ctrl/Cmd+Enter)" : "This language can't run yet"}
+            disabled={busy || !canRun}
+            title={canRun ? "Run with your input (Ctrl/Cmd+Enter)" : "This language can't run yet"}
+            className="rounded-md border border-green-600 px-3 py-1 text-sm font-medium text-green-400 hover:bg-green-600/15 disabled:opacity-50"
+          >
+            {run.phase === "queued" || run.phase === "running" ? "Running…" : "▶ Run"}
+          </button>
+          <button
+            onClick={handleSubmit}
+            disabled={busy || !canRun}
+            title="Judge against all test cases (Ctrl/Cmd+Shift+Enter)"
             className="rounded-md bg-green-600 px-3 py-1 text-sm font-medium text-white hover:bg-green-500 disabled:opacity-50"
           >
-            {running ? "Running…" : "▶ Run"}
+            {submit.phase === "queued" || submit.phase === "running" ? "Judging…" : "Submit"}
           </button>
         </div>
       </div>
@@ -245,12 +366,13 @@ export function Workspace({
           value={code}
           onChange={handleChange}
           onRun={handleRun}
+          onSubmit={handleSubmit}
           onSave={handleSave}
         />
       </div>
 
-      {/* Run console */}
-      <div className="flex h-56 shrink-0 flex-col border-t border-white/10 bg-[#1e1e1e] text-white">
+      {/* Console: stdin + run output / verdict */}
+      <div className="flex h-60 shrink-0 flex-col border-t border-white/10 bg-[#1e1e1e] text-white">
         <div className="grid min-h-0 flex-1 grid-cols-3">
           <div className="flex flex-col border-r border-white/10">
             <label className="px-3 py-1 text-xs uppercase tracking-wide text-white/40">
@@ -259,17 +381,22 @@ export function Workspace({
             <textarea
               value={stdin}
               onChange={(e) => setStdin(e.target.value)}
-              placeholder="Program input…"
+              placeholder="Program input for Run…"
               spellCheck={false}
               className="min-h-0 flex-1 resize-none bg-transparent px-3 pb-2 font-mono text-xs text-white/90 outline-none placeholder:text-white/30"
             />
           </div>
           <div className="col-span-2 flex min-h-0 flex-col">
             <div className="flex items-center justify-between px-3 py-1">
-              <span className="text-xs uppercase tracking-wide text-white/40">
-                output
-              </span>
-              {run.phase === "done" && (
+              <div className="flex gap-3">
+                <button className={tabClass(panel === "output")} onClick={() => setPanel("output")}>
+                  output
+                </button>
+                <button className={tabClass(panel === "verdict")} onClick={() => setPanel("verdict")}>
+                  verdict
+                </button>
+              </div>
+              {panel === "output" && run.phase === "done" && (
                 <span
                   className={`text-xs ${
                     run.result.status === "done" && run.result.exitCode === 0
@@ -277,40 +404,43 @@ export function Workspace({
                       : "text-red-400"
                   }`}
                 >
-                  {run.result.status === "error"
-                    ? "error"
-                    : `exit ${run.result.exitCode}`}
+                  {run.result.status === "error" ? "error" : `exit ${run.result.exitCode}`}
                 </span>
               )}
             </div>
-            <pre className="min-h-0 flex-1 overflow-auto whitespace-pre-wrap px-3 pb-2 font-mono text-xs">
-              {run.phase === "idle" && (
-                <span className="text-white/30">
-                  {canRun
-                    ? "Click Run to execute in a sandbox."
-                    : "This language can't run yet."}
-                </span>
-              )}
-              {running && <span className="text-white/50">Running…</span>}
-              {run.phase === "done" && (
-                <>
-                  {run.result.stdout && (
-                    <span className="text-white/90">{run.result.stdout}</span>
-                  )}
-                  {run.result.stderr && (
-                    <span className="text-red-400">{run.result.stderr}</span>
-                  )}
-                  {!run.result.stdout && !run.result.stderr && (
-                    <span className="text-white/30">(no output)</span>
-                  )}
-                  {run.result.truncated && (
-                    <span className="text-amber-400">
-                      {"\n"}[output truncated at 64 KB]
-                    </span>
-                  )}
-                </>
-              )}
-            </pre>
+
+            {panel === "output" ? (
+              <pre className="min-h-0 flex-1 overflow-auto whitespace-pre-wrap px-3 pb-2 font-mono text-xs">
+                {run.phase === "idle" && (
+                  <span className="text-white/30">
+                    {canRun
+                      ? "Click Run to execute with the input on the left."
+                      : "This language can't run yet."}
+                  </span>
+                )}
+                {(run.phase === "queued" || run.phase === "running") && (
+                  <span className="text-white/50">Running…</span>
+                )}
+                {run.phase === "done" && (
+                  <>
+                    {run.result.stdout && <span className="text-white/90">{run.result.stdout}</span>}
+                    {run.result.stderr && <span className="text-red-400">{run.result.stderr}</span>}
+                    {!run.result.stdout && !run.result.stderr && (
+                      <span className="text-white/30">(no output)</span>
+                    )}
+                    {run.result.truncated && (
+                      <span className="text-amber-400">
+                        {"\n"}[output truncated at 64 KB]
+                      </span>
+                    )}
+                  </>
+                )}
+              </pre>
+            ) : (
+              <div className="min-h-0 flex-1 overflow-auto px-3 pb-2">
+                <VerdictView state={submit} />
+              </div>
+            )}
           </div>
         </div>
       </div>

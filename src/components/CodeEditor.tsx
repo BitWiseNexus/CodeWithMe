@@ -15,6 +15,7 @@ export function CodeEditor({
   value,
   onChange,
   onRun,
+  onSubmit,
   onSave,
 }: {
   language: Language;
@@ -22,6 +23,8 @@ export function CodeEditor({
   onChange: (value: string) => void;
   /** Ctrl/Cmd+Enter while the editor has focus. */
   onRun?: () => void;
+  /** Ctrl/Cmd+Shift+Enter while the editor has focus. */
+  onSubmit?: () => void;
   /** Ctrl/Cmd+S while the editor has focus. */
   onSave?: () => void;
 }) {
@@ -30,15 +33,20 @@ export function CodeEditor({
   // work while typing are registered inside the editor. Refs keep the
   // once-registered commands calling the latest handlers.
   const onRunRef = useRef(onRun);
+  const onSubmitRef = useRef(onSubmit);
   const onSaveRef = useRef(onSave);
   useEffect(() => {
     onRunRef.current = onRun;
+    onSubmitRef.current = onSubmit;
     onSaveRef.current = onSave;
-  }, [onRun, onSave]);
+  }, [onRun, onSubmit, onSave]);
 
   const handleMount: OnMount = (editor, monaco) => {
     editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.Enter, () =>
       onRunRef.current?.()
+    );
+    editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyMod.Shift | monaco.KeyCode.Enter, () =>
+      onSubmitRef.current?.()
     );
     editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyS, () =>
       onSaveRef.current?.()

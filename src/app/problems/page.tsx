@@ -3,7 +3,8 @@ import { Header } from "@/components/Header";
 import { CreateRoomButton } from "@/components/CreateRoomButton";
 import { requireUser } from "@/lib/auth";
 import { listProblems } from "@/lib/db/problems";
-import type { Difficulty, Problem } from "@/lib/types";
+import { getProgressMap } from "@/lib/db/progress";
+import type { Difficulty, Problem, ProgressStatus } from "@/lib/types";
 
 const DIFFICULTY_COLOR: Record<Difficulty, string> = {
   easy: "text-green-600 dark:text-green-400",
@@ -12,11 +13,12 @@ const DIFFICULTY_COLOR: Record<Difficulty, string> = {
 };
 
 export default async function ProblemsPage() {
-  await requireUser();
+  const user = await requireUser();
   let problems: Problem[] | null = null;
+  let progress: Record<string, ProgressStatus> = {};
   let error: Error | null = null;
   try {
-    problems = await listProblems();
+    [problems, progress] = await Promise.all([listProblems(), getProgressMap(user.id)]);
   } catch (e) {
     error = e instanceof Error ? e : new Error(String(e));
   }
@@ -50,7 +52,19 @@ export default async function ProblemsPage() {
                 href={`/problems/${p.slug}`}
                 className="flex items-center justify-between px-4 py-3 hover:bg-black/5 dark:hover:bg-white/5"
               >
-                <span className="font-medium">{p.title}</span>
+                <span className="flex items-center gap-2 font-medium">
+                  <span
+                    className="w-4 text-center"
+                    title={progress[p.id] === "solved" ? "Solved" : progress[p.id] === "attempted" ? "Attempted" : undefined}
+                  >
+                    {progress[p.id] === "solved" ? (
+                      <span className="text-green-600 dark:text-green-400">✓</span>
+                    ) : progress[p.id] === "attempted" ? (
+                      <span className="text-amber-600 dark:text-amber-400">•</span>
+                    ) : null}
+                  </span>
+                  {p.title}
+                </span>
                 <span
                   className={`text-xs font-semibold uppercase ${DIFFICULTY_COLOR[p.difficulty]}`}
                 >
