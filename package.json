@@ -10,7 +10,11 @@
     "dev:all": "concurrently -n next,server,worker -c blue,green,magenta \"npm:dev\" \"npm:server\" \"npm:worker\"",
     "build": "next build",
     "start": "next start",
-    "lint": "eslint"
+    "start:server": "tsx server/index.ts",
+    "start:worker": "tsx server/worker.ts",
+    "lint": "eslint",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run"
   },
   "dependencies": {
     "@monaco-editor/react": "^4.7.0",
@@ -39,6 +43,7 @@
     "eslint-config-next": "16.2.9",
     "tailwindcss": "^4",
     "tsx": "^4.22.4",
-    "typescript": "^5"
+    "typescript": "^5",
+    "vitest": "^4.1.12"
   }
 }

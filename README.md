@@ -72,11 +72,16 @@ all direct client access — the app only touches Firestore from the server via
 the Admin SDK, after verifying the session cookie. Data layout:
 
 ```
-problems/{slug}                            title, description, difficulty, created_at
-problems/{slug}/test_cases/{id}            input, expected_output, is_sample, ordinal
-submissions/{uid}_{problemId}_{language}   saved code (one per triple)
-executions/{autoId}                        one per "Run", completed by the worker
+problems/{slug}                        title, description, difficulty, created_at
+problems/{slug}/test_cases/{id}        input, expected_output, is_sample, ordinal
+drafts/{uid}_{problemId}_{language}    saved code (one per triple)
+executions/{autoId}                    one per "Run", completed by the worker
 ```
+
+Optional but recommended: let Firestore delete old runs automatically. Each
+execution has an `expire_at` field (7 days out). In the Google Cloud console
+open **Firestore → Time-to-live (TTL) → Create policy**, collection group
+`executions`, timestamp field `expire_at`.
 
 ### 4. Start Redis + sandbox images (Phase 3)
 
@@ -104,6 +109,12 @@ npm run dev:all      # next (:3000) + server (:3001/:4444) + worker
 
 Or in separate terminals: `npm run dev`, `npm run server`, `npm run worker`.
 
+Checks (also run by CI on every push, see `.github/workflows/ci.yml`):
+
+```bash
+npm run lint && npm run typecheck && npm test
+```
+
 Open [http://localhost:3000](http://localhost:3000). You'll be redirected to
 `/login`; sign up, then you'll land on `/problems`.
 
@@ -124,6 +135,8 @@ Open [http://localhost:3000](http://localhost:3000). You'll be redirected to
    runs it in a throwaway container, and stdout/stderr appear in the console.
 4. Untrusted code is safe: no network, capped memory/CPU/PIDs, read-only FS, and
    an 8s wall-clock kill (an infinite loop returns `exit 137`, not a hung server).
+5. Each user can run 10 times per minute. If the result doesn't arrive over the
+   socket, the page falls back to polling and gives up with an error after 60s.
 
 ## Project structure
 
@@ -131,21 +144,25 @@ Open [http://localhost:3000](http://localhost:3000). You'll be redirected to
 server/
   index.ts                      # Socket.IO presence/cursors + /worker relay (:3001)
   signaling.ts                  # self-hosted y-webrtc signaling relay (:4444)
-  worker.ts                     # drains Redis queue, runs code in Docker sandbox
+  worker.ts                     # drains Redis queue → sandbox → Firestore + result
+  sandbox.ts                    # docker run flags, output caps, orphan cleanup
+  config.ts                     # WORKER_SECRET (required in production)
   firebaseAdmin.ts              # Admin SDK init for worker + seed script
 scripts/seed.ts                 # seeds Firestore with starter problems
 src/
   proxy.ts                      # Next 16 "middleware": session check + guards
   lib/
+    db/                         # ALL Firestore access: problems, drafts, executions
     firebase/admin.ts           # Admin SDK (auth + Firestore), server-only
     firebase/client.ts          # client SDK, used only to sign in
     firebase/proxy.ts           # session-cookie verification for proxy.ts
-    firebase/data.ts            # Firestore collection refs + converters
     auth.ts                     # requireUser() / getUser() DAL helpers
-    redis.ts                    # shared ioredis connection (route handlers)
+    redis.ts                    # shared ioredis connection + rateLimit()
+    redirect.ts                 # safeRedirect() for post-login redirects
     types.ts                    # shared types, language list, starter code
-    collab.ts                   # room user/cursor types + color helper
-    exec.ts                     # execution job/result types + queue name
+    collab.ts                   # room types, room-id check, color helper
+    exec.ts                     # job/result types, runnable languages, limits
+                                #   (collab.ts + exec.ts are also imported by server/)
   components/
     CodeEditor.tsx              # Monaco wrapper (single-player)
     Workspace.tsx               # editor + save + Run console (client)
@@ -153,7 +170,8 @@ src/
     CreateRoomButton.tsx        # spins up a new /room/<id>
     Header.tsx                  # nav + sign out
   app/
-    api/run/route.ts            # POST: insert execution + enqueue job
+    api/run/route.ts            # POST: rate-limit, insert execution, enqueue job
+    api/executions/[id]/        # GET: run status/result (polling fallback)
     login/                      # auth page, form, session-cookie actions
     problems/                   # list + [slug] detail with editor
     room/[id]/                  # collaborative session page
@@ -187,11 +205,16 @@ Browser ──POST /api/run──▶ Next route ──LPUSH──▶ Redis queue
         Browser ◀──"execution:result"── Socket.IO server (exec:<id> room)
 ```
 
-Container lockdown (`server/worker.ts`): `--network none`, `--memory 256m`
+Container lockdown (`server/sandbox.ts`): `--network none`, `--memory 256m`
 (no swap), `--cpus 0.5`, `--pids-limit 64`, `--read-only` root + small
-`noexec` tmpfs, `--cap-drop ALL`, `--security-opt no-new-privileges`, `--rm`,
-and an 8s wall-clock kill. Code is passed via an env var (base64) — the host
-filesystem is never mounted.
+`noexec` tmpfs, runs as `nobody` (`--user 65534:65534`), `nofile`/`fsize`
+ulimits, `--cap-drop ALL`, `--security-opt no-new-privileges`, `--rm`, and an
+8s wall-clock kill. The code is sent as the first line of stdin (base64), so
+there's no command-line length limit, and the host filesystem is never
+mounted. stdout/stderr are capped at 64 KB each.
+
+The worker sends the result before writing it to Firestore, and database
+writes time out after 10s, so a Firestore problem never blocks results.
 
 ## Milestone status
 

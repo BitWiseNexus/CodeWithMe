@@ -1,8 +1,20 @@
+// Shared by the browser and the realtime server (server/index.ts).
+
 export interface RoomUser {
   id: string; // socket id (assigned server-side)
   name: string;
   color: string;
 }
+
+/**
+ * Socket.IO room name for a collaborative room. Prefixed so a client can't
+ * join another namespace (e.g. `exec:<id>`) by picking a crafted room id.
+ */
+export const roomChannel = (roomId: string) => `room:${roomId}`;
+
+/** Room ids are URL-safe tokens; anything else is rejected by page and server. */
+export const isValidRoomId = (id: unknown): id is string =>
+  typeof id === "string" && /^[A-Za-z0-9_-]{1,64}$/.test(id);
 
 export interface CursorPayload {
   position: { lineNumber: number; column: number } | null;

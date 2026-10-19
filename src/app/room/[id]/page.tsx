@@ -1,5 +1,6 @@
+import { notFound } from "next/navigation";
 import { requireUser } from "@/lib/auth";
-import { colorFor } from "@/lib/collab";
+import { colorFor, isValidRoomId } from "@/lib/collab";
 import { RoomClient } from "./RoomClient";
 
 export default async function RoomPage({
@@ -9,6 +10,9 @@ export default async function RoomPage({
 }) {
   const { id } = await params;
   const authUser = await requireUser();
+  if (!isValidRoomId(id)) {
+    notFound();
+  }
 
   const name = authUser.email?.split("@")[0] ?? "anon";
   const user = { name, color: colorFor(authUser.email ?? authUser.id) };

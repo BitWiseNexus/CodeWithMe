@@ -2,7 +2,7 @@ import Link from "next/link";
 import { Header } from "@/components/Header";
 import { CreateRoomButton } from "@/components/CreateRoomButton";
 import { requireUser } from "@/lib/auth";
-import { problemsCol, toProblem } from "@/lib/firebase/data";
+import { listProblems } from "@/lib/db/problems";
 import type { Difficulty, Problem } from "@/lib/types";
 
 const DIFFICULTY_COLOR: Record<Difficulty, string> = {
@@ -16,8 +16,7 @@ export default async function ProblemsPage() {
   let problems: Problem[] | null = null;
   let error: Error | null = null;
   try {
-    const snap = await problemsCol().orderBy("created_at", "asc").get();
-    problems = snap.docs.map(toProblem);
+    problems = await listProblems();
   } catch (e) {
     error = e instanceof Error ? e : new Error(String(e));
   }

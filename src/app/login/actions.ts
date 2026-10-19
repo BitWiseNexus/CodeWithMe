@@ -3,15 +3,9 @@
 import { cookies } from "next/headers";
 import { redirect } from "next/navigation";
 import { adminAuth, SESSION_COOKIE, SESSION_MAX_AGE_MS } from "@/lib/firebase/admin";
+import { safeRedirect } from "@/lib/redirect";
 
 export type AuthState = { error: string } | undefined;
-
-/** Only allow same-site relative redirects (no `//evil.com` or absolute URLs). */
-function safeRedirect(target: string) {
-  return target.startsWith("/") && !target.startsWith("//") && !target.startsWith("/\\")
-    ? target
-    : "/problems";
-}
 
 /**
  * Exchanges a freshly minted Firebase ID token (from the client SDK sign-in /
@@ -54,7 +48,7 @@ export async function createSession(
     path: "/",
   });
 
-  redirect(safeRedirect(String(redirectTo ?? "")));
+  redirect(safeRedirect(redirectTo));
 }
 
 export async function signOut() {

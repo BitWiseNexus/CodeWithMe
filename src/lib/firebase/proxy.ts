@@ -30,7 +30,10 @@ export async function updateSession(request: NextRequest) {
 
   let response: NextResponse;
 
-  if (!signedIn && !isPublicRoute) {
+  if (!signedIn && pathname.startsWith("/api/")) {
+    // API callers (fetch) expect JSON, not the HTML of the login page.
+    response = NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+  } else if (!signedIn && !isPublicRoute) {
     // Unauthenticated user trying to reach a protected route -> /login
     const url = request.nextUrl.clone();
     url.pathname = "/login";

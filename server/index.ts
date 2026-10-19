@@ -1,28 +1,20 @@
 import { createServer } from "node:http";
 import { Server as SocketIOServer } from "socket.io";
+import { isValidRoomId, roomChannel, type CursorPayload, type RoomUser } from "@/lib/collab";
+import { execRoom, type ExecResult } from "@/lib/exec";
+import { requireWorkerSecret } from "./config";
 import { startSignalingServer } from "./signaling";
 
 const SOCKET_PORT = Number(process.env.SOCKET_PORT ?? 3001);
 const SIGNALING_PORT = Number(process.env.SIGNALING_PORT ?? 4444);
 const CLIENT_ORIGIN = process.env.CLIENT_ORIGIN ?? "http://localhost:3000";
-const WORKER_SECRET = process.env.WORKER_SECRET ?? "dev-worker-secret";
+const WORKER_SECRET = requireWorkerSecret();
 
-// --- Types shared with the client (kept in sync with src/lib/collab.ts) ---
-interface RoomUser {
-  id: string; // socket id
-  name: string;
-  color: string;
-}
+/** How long a finished result is kept for late `watch` calls. */
+const RESULT_TTL_MS = 60_000;
 
-interface CursorPayload {
-  position: { lineNumber: number; column: number } | null;
-  selection: {
-    startLineNumber: number;
-    startColumn: number;
-    endLineNumber: number;
-    endColumn: number;
-  } | null;
-}
+const EXECUTION_ID = /^[A-Za-z0-9]{1,128}$/;
+const COLOR = /^#[0-9a-fA-F]{6}$/;
 
 // --- y-webrtc signaling relay ---
 startSignalingServer(SIGNALING_PORT);
@@ -37,44 +29,73 @@ const io = new SocketIOServer(httpServer, {
   cors: { origin: CLIENT_ORIGIN, methods: ["GET", "POST"] },
 });
 
-async function presenceList(roomId: string): Promise<RoomUser[]> {
-  const sockets = await io.in(roomId).fetchSockets();
+async function presenceList(channel: string): Promise<RoomUser[]> {
+  const sockets = await io.in(channel).fetchSockets();
   return sockets.map((s) => s.data.user as RoomUser).filter(Boolean);
 }
 
-io.on("connection", (socket) => {
-  socket.on(
-    "join",
-    async ({ roomId, user }: { roomId: string; user: Omit<RoomUser, "id"> }) => {
-      socket.data.roomId = roomId;
-      socket.data.user = { ...user, id: socket.id } satisfies RoomUser;
-      await socket.join(roomId);
+/**
+ * Recently finished results. The browser only learns an execution id after
+ * the job is queued, so a fast result can arrive before its `watch` — this
+ * cache lets `watch` replay it instead of losing it.
+ */
+const recentResults = new Map<string, ExecResult>();
 
-      // Send the joiner the current roster, then tell the room about everyone.
-      io.to(roomId).emit("presence", await presenceList(roomId));
+function rememberResult(result: ExecResult) {
+  recentResults.set(result.executionId, result);
+  setTimeout(() => recentResults.delete(result.executionId), RESULT_TTL_MS).unref();
+}
+
+io.on("connection", (socket) => {
+  socket.on("join", async (payload: { roomId?: unknown; user?: Partial<RoomUser> }) => {
+    const roomId = payload?.roomId;
+    const name = payload?.user?.name;
+    const color = payload?.user?.color;
+    if (!isValidRoomId(roomId)) return;
+    if (typeof name !== "string" || !name.trim() || typeof color !== "string" || !COLOR.test(color)) {
+      return;
     }
-  );
+    if (socket.data.channel) return; // one room per connection
+
+    // TODO(Phase 7.1): take name/color from a verified token, not the client.
+    const channel = roomChannel(roomId);
+    socket.data.channel = channel;
+    socket.data.user = { id: socket.id, name: name.slice(0, 40), color } satisfies RoomUser;
+    await socket.join(channel);
+
+    // Send the joiner the current roster, then tell the room about everyone.
+    io.to(channel).emit("presence", await presenceList(channel));
+  });
 
   socket.on("cursor", (payload: CursorPayload) => {
-    const roomId = socket.data.roomId as string | undefined;
+    const channel = socket.data.channel as string | undefined;
     const user = socket.data.user as RoomUser | undefined;
-    if (!roomId || !user) return;
+    if (!channel || !user || typeof payload !== "object" || payload === null) return;
     // Relay to everyone else in the room (not back to sender).
-    socket.to(roomId).emit("cursor", { user, ...payload });
+    socket.to(channel).emit("cursor", {
+      user,
+      position: payload.position ?? null,
+      selection: payload.selection ?? null,
+    });
   });
 
   // Client subscribes to results for a specific execution it kicked off.
-  socket.on("watch", ({ executionId }: { executionId: string }) => {
-    if (typeof executionId === "string") socket.join(`exec:${executionId}`);
+  socket.on("watch", (payload: { executionId?: unknown }) => {
+    const executionId = payload?.executionId;
+    if (typeof executionId !== "string" || !EXECUTION_ID.test(executionId)) return;
+    socket.join(execRoom(executionId));
+
+    const finished = recentResults.get(executionId);
+    if (finished) socket.emit("execution:result", finished);
   });
 
   socket.on("disconnecting", () => {
-    const roomId = socket.data.roomId as string | undefined;
-    if (!roomId) return;
-    socket.to(roomId).emit("peer-left", { id: socket.id });
+    const channel = socket.data.channel as string | undefined;
+    if (!channel) return;
+    socket.to(channel).emit("peer-left", { id: socket.id });
     // Recompute presence after this socket has left (next tick).
     setTimeout(async () => {
-      io.to(roomId).emit("presence", await presenceList(roomId));
+      io.to(channel).emit("presence", await presenceList(channel));
     }, 0);
   });
 });
@@ -88,10 +109,11 @@ workerNsp.use((socket, next) => {
 });
 workerNsp.on("connection", (socket) => {
   console.log("[socket.io] worker connected");
-  socket.on("result", (payload: { executionId: string }) => {
-    if (!payload?.executionId) return;
+  socket.on("result", (result: ExecResult) => {
+    if (typeof result?.executionId !== "string") return;
+    rememberResult(result);
     // Relay to whoever is watching this execution.
-    io.to(`exec:${payload.executionId}`).emit("execution:result", payload);
+    io.to(execRoom(result.executionId)).emit("execution:result", result);
   });
 });
 

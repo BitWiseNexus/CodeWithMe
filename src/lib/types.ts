@@ -6,6 +6,9 @@ export const LANGUAGES: { value: Language; label: string }[] = [
   { value: "javascript", label: "JavaScript" },
 ];
 
+export const isLanguage = (value: unknown): value is Language =>
+  LANGUAGES.some((l) => l.value === value);
+
 export type Difficulty = "easy" | "medium" | "hard";
 
 export interface Problem {
@@ -26,8 +29,8 @@ export interface TestCase {
   ordinal: number;
 }
 
-export interface Submission {
-  id: string;
+/** Code a user saved (Ctrl/Cmd+S) for a problem + language. Not judged. */
+export interface Draft {
   user_id: string;
   problem_id: string;
   language: Language;

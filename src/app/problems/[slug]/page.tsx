@@ -2,16 +2,8 @@ import { notFound } from "next/navigation";
 import Link from "next/link";
 import { Workspace } from "@/components/Workspace";
 import { requireUser } from "@/lib/auth";
-import { db } from "@/lib/firebase/admin";
-import {
-  isValidDocId,
-  problemsCol,
-  submissionRef,
-  testCasesCol,
-  toProblem,
-  toTestCase,
-} from "@/lib/firebase/data";
-import { LANGUAGES, type Language } from "@/lib/types";
+import { getDrafts } from "@/lib/db/drafts";
+import { getProblem, listSampleTests } from "@/lib/db/problems";
 
 export default async function ProblemPage({
   params,
@@ -20,32 +12,16 @@ export default async function ProblemPage({
 }) {
   const { slug } = await params;
   const user = await requireUser();
-  if (!isValidDocId(slug)) {
+
+  const problem = await getProblem(slug);
+  if (!problem) {
     notFound();
   }
 
-  const problemDoc = await problemsCol().doc(slug).get();
-  if (!problemDoc.exists) {
-    notFound();
-  }
-  const problem = toProblem(problemDoc);
-
-  const [sampleSnap, subDocs] = await Promise.all([
-    // Only sample cases are ever shown; hidden ones stay server-side.
-    testCasesCol(problem.id).where("is_sample", "==", true).get(),
-    db.getAll(...LANGUAGES.map((l) => submissionRef(user.id, problem.id, l.value))),
+  const [samples, savedCode] = await Promise.all([
+    listSampleTests(problem.id),
+    getDrafts(user.id, problem.id),
   ]);
-
-  // Sorted in memory to avoid needing a composite index for a handful of docs.
-  const samples = sampleSnap.docs
-    .map((d) => toTestCase(d, problem.id))
-    .sort((a, b) => a.ordinal - b.ordinal);
-
-  const savedCode: Partial<Record<Language, string>> = {};
-  for (const s of subDocs) {
-    const data = s.data();
-    if (data) savedCode[data.language as Language] = data.code;
-  }
 
   return (
     <div className="flex h-screen flex-col bg-[#1e1e1e] text-white">
