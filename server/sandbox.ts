@@ -2,13 +2,79 @@ import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { MAX_OUTPUT_BYTES, type ExecJob, type RunnableLanguage } from "@/lib/exec";
 
-/** Wall-clock limit per run. */
-export const TIMEOUT_MS = 8_000;
+/** Wall-clock limit for the user's program. */
+export const RUN_TIMEOUT_S = 8;
+/** C++ only: separate wall-clock limit for compiling. */
+const COMPILE_TIMEOUT_S = 15;
+/** Must match the flags the precompiled header was built with (sandbox/cpp/Dockerfile). */
+const CPP_FLAGS = "-std=c++17 -O2 -pipe";
 
-// Per-language sandbox image + filename + run command.
-const RUNTIMES: Record<RunnableLanguage, { image: string; file: string; cmd: string }> = {
-  python: { image: "python:3.12-alpine", file: "main.py", cmd: "python" },
-  javascript: { image: "node:20-alpine", file: "main.js", cmd: "node" },
+/**
+ * Line 1 of stdin is the program source in base64 (command lines are length-
+ * limited: ~32k chars on Windows, 128 KiB per argument on Linux). The rest of
+ * stdin is left for the program.
+ */
+const decodeTo = (file: string) => `read -r CODE && printf %s "$CODE" | base64 -d > /tmp/${file}`;
+
+interface Runtime {
+  image: string;
+  /** Shell script run inside the container. */
+  script: string;
+  /** Container memory. C++ needs headroom for the compiler. */
+  memory: string;
+  /** Writable scratch dir. Only C++ may execute files there (its binary). */
+  tmpfs: string;
+  /** Max size of any file written (RLIMIT_FSIZE), in bytes. */
+  maxFileBytes: number;
+  /** Worker-side safety net: the whole container is killed after this. */
+  timeoutMs: number;
+}
+
+const RUNTIMES: Record<RunnableLanguage, Runtime> = {
+  python: {
+    image: "python:3.12-alpine",
+    script: `${decodeTo("main.py")} && exec python /tmp/main.py`,
+    memory: "256m",
+    tmpfs: "/tmp:rw,size=16m,noexec,nosuid,nodev,mode=1777",
+    maxFileBytes: 1024 * 1024,
+    timeoutMs: RUN_TIMEOUT_S * 1000,
+  },
+  javascript: {
+    image: "node:20-alpine",
+    script: `${decodeTo("main.js")} && exec node /tmp/main.js`,
+    memory: "256m",
+    tmpfs: "/tmp:rw,size=16m,noexec,nosuid,nodev,mode=1777",
+    maxFileBytes: 1024 * 1024,
+    timeoutMs: RUN_TIMEOUT_S * 1000,
+  },
+  cpp: {
+    // Built locally from sandbox/cpp/Dockerfile (npm run sandbox:images).
+    image: "codewithme-cpp",
+    // Compile and run get separate limits via busybox `timeout` (exits 137
+    // when it kills). The program itself is held to 256 MB like the others,
+    // via `ulimit -v`; the container's 512 MB is headroom for the compiler.
+    script: [
+      `${decodeTo("main.cpp")} || exit 1`,
+      `if ! timeout -s KILL ${COMPILE_TIMEOUT_S} g++ ${CPP_FLAGS} -o /tmp/main /tmp/main.cpp; then`,
+      `  printf '\\n[Compilation failed]\\n' >&2; exit 1`,
+      `fi`,
+      `start=$(date +%s)`,
+      `(ulimit -v 262144; exec timeout -s KILL ${RUN_TIMEOUT_S} /tmp/main)`,
+      `code=$?`,
+      `if [ "$code" -eq 137 ]; then`,
+      `  if [ $(( $(date +%s) - start )) -ge ${RUN_TIMEOUT_S} ]; then`,
+      `    printf '\\n[Killed: exceeded ${RUN_TIMEOUT_S}s time limit]\\n' >&2`,
+      `  else`,
+      `    printf '\\n[Killed: memory limit exceeded]\\n' >&2`,
+      `  fi`,
+      `fi`,
+      `exit $code`,
+    ].join("\n"),
+    memory: "512m",
+    tmpfs: "/tmp:rw,exec,size=64m,nosuid,nodev,mode=1777",
+    maxFileBytes: 64 * 1024 * 1024,
+    timeoutMs: (COMPILE_TIMEOUT_S + RUN_TIMEOUT_S + 5) * 1000,
+  },
 };
 
 export interface RunOutcome {
@@ -48,42 +114,37 @@ export class CappedBuffer {
 
 /**
  * Builds the `docker run` arguments for one job. The program source is NOT in
- * here: it arrives as the first line of stdin (base64), because command lines
- * are length-limited (~32k chars on Windows, 128 KiB per argument on Linux).
+ * here — it arrives on stdin (see `decodeTo`).
  */
 export function dockerArgs(language: RunnableLanguage, containerName: string): string[] {
   const rt = RUNTIMES[language];
-  // Read line 1 (the base64 source) into a file, then hand the rest of stdin
-  // to the program.
-  const script =
-    `read -r CODE && printf %s "$CODE" | base64 -d > /tmp/${rt.file}` +
-    ` && exec ${rt.cmd} /tmp/${rt.file}`;
-
   return [
     "run",
     "--rm",
     "-i",
+    "--pull",
+    "never", // a missing image fails fast instead of downloading mid-run
     "--name",
     containerName,
     "--network",
     "none", // no internet / no localhost access
     "--memory",
-    "256m",
+    rt.memory,
     "--memory-swap",
-    "256m", // disallow swap escape
+    rt.memory, // disallow swap escape
     "--cpus",
     "0.5",
     "--pids-limit",
     "64", // fork-bomb guard
     "--read-only", // immutable root fs...
     "--tmpfs",
-    "/tmp:rw,size=16m,noexec,nosuid,nodev,mode=1777", // ...with a small writable scratch dir
+    rt.tmpfs, // ...with a small writable scratch dir
     "--user",
     "65534:65534", // "nobody" — never root inside the container
     "--ulimit",
     "nofile=128:128",
     "--ulimit",
-    "fsize=1048576:1048576", // max 1 MB per written file
+    `fsize=${rt.maxFileBytes}:${rt.maxFileBytes}`,
     "--security-opt",
     "no-new-privileges",
     "--cap-drop",
@@ -91,7 +152,7 @@ export function dockerArgs(language: RunnableLanguage, containerName: string): s
     rt.image,
     "sh",
     "-c",
-    script,
+    rt.script,
   ];
 }
 
@@ -127,6 +188,7 @@ export function removeOrphanedContainers(): Promise<number> {
 
 /** Run untrusted code in a throwaway, locked-down container. */
 export function runInSandbox(job: Pick<ExecJob, "language" | "code" | "stdin">): Promise<RunOutcome> {
+  const rt = RUNTIMES[job.language];
   const containerName = `cwm-exec-${randomUUID().slice(0, 12)}`;
   const codeB64 = Buffer.from(job.code, "utf8").toString("base64");
 
@@ -158,7 +220,7 @@ export function runInSandbox(job: Pick<ExecJob, "language" | "code" | "stdin">):
       timedOut = true;
       // Forcibly stop the container; --rm cleans it up.
       spawn("docker", ["kill", containerName]).on("error", () => {});
-    }, TIMEOUT_MS);
+    }, rt.timeoutMs);
 
     // Last resort: never let a stuck docker CLI hang the worker.
     const hardStop = setTimeout(() => {
@@ -169,11 +231,15 @@ export function runInSandbox(job: Pick<ExecJob, "language" | "code" | "stdin">):
         exitCode: null,
         timedOut: true,
       });
-    }, TIMEOUT_MS + 10_000);
+    }, rt.timeoutMs + 10_000);
 
     child.on("close", (code) => {
       let err = stderr.toString();
-      if (timedOut) err += `\n[Killed: exceeded ${TIMEOUT_MS / 1000}s time limit]`;
+      if (timedOut) err += `\n[Killed: exceeded ${rt.timeoutMs / 1000}s time limit]`;
+      // Exit 125 = docker itself failed (e.g. the image isn't on this machine).
+      if (code === 125 && /No such image/i.test(err)) {
+        err += `\n[worker] sandbox image "${rt.image}" is missing — run: npm run sandbox:images`;
+      }
       finish({ stdout: stdout.toString(), stderr: err, exitCode: code, timedOut });
     });
 

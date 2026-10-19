@@ -47,5 +47,21 @@ describe("dockerArgs", () => {
   it("uses the right runtime per language", () => {
     expect(args).toContain("python:3.12-alpine");
     expect(dockerArgs("javascript", "x")).toContain("node:20-alpine");
+    expect(dockerArgs("cpp", "x")).toContain("codewithme-cpp");
+  });
+
+  it("never pulls images mid-run", () => {
+    expect(joined).toContain("--pull never");
+  });
+
+  it("only lets C++ execute files in its scratch dir", () => {
+    const tmpfs = (lang: "python" | "javascript" | "cpp") => {
+      const a = dockerArgs(lang, "x");
+      return a[a.indexOf("--tmpfs") + 1];
+    };
+    expect(tmpfs("python")).toContain("noexec");
+    expect(tmpfs("javascript")).toContain("noexec");
+    expect(tmpfs("cpp")).not.toContain("noexec");
+    expect(tmpfs("cpp")).toContain("nosuid");
   });
 });

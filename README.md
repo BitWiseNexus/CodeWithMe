@@ -8,7 +8,7 @@ A real-time collaborative coding platform (a mini LeetCode + VS Code).
   text sync (peer-to-peer) and a Socket.IO server for presence + live cursors.
 - **Phase 3 — execution sandbox:** click "Run" → job is queued in Redis → a
   worker executes the code in a locked-down Docker container → stdout/stderr
-  stream back to the browser over Socket.IO. (Python & JS; C++ coming.)
+  stream back to the browser over Socket.IO. (Python, JavaScript and C++.)
 
 ## Tech stack
 
@@ -92,10 +92,13 @@ Desktop must be running.
 # Redis broker
 docker run -d --name codewithme-redis -p 6379:6379 redis:7-alpine
 
-# Sandbox runtime images
-docker pull python:3.12-alpine
-docker pull node:20-alpine
+# Sandbox runtime images: pulls Python + Node, builds the C++ image
+# (Alpine + g++ with a precompiled <bits/stdc++.h>, ~470 MB, ~1 min)
+npm run sandbox:images
 ```
+
+The worker never downloads images on its own (`--pull never`), so a missing
+image fails fast with a hint to run this command.
 
 ### 5. Run the dev servers
 
@@ -212,6 +215,12 @@ ulimits, `--cap-drop ALL`, `--security-opt no-new-privileges`, `--rm`, and an
 8s wall-clock kill. The code is sent as the first line of stdin (base64), so
 there's no command-line length limit, and the host filesystem is never
 mounted. stdout/stderr are capped at 64 KB each.
+
+C++ (`codewithme-cpp` image) compiles with `g++ -std=c++17 -O2` under its own
+15 s limit, then runs under the same 8 s limit. Its container gets 512 MB so the
+compiler has headroom, but the program itself is capped at 256 MB (`ulimit -v`).
+Its scratch dir allows executing the compiled binary; the Python and JS ones
+don't.
 
 The worker sends the result before writing it to Firestore, and database
 writes time out after 10s, so a Firestore problem never blocks results.

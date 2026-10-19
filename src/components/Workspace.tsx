@@ -187,7 +187,8 @@ export function Workspace({
     void pollExecution(data.executionId);
   }, [language, code, stdin, problemId, running, finishRun, pollExecution]);
 
-  // Ctrl/Cmd+S to save, Ctrl/Cmd+Enter to run.
+  // Ctrl/Cmd+S to save, Ctrl/Cmd+Enter to run — when focus is outside the
+  // editor (e.g. the stdin box). Inside Monaco, CodeEditor handles them.
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "s") {
@@ -230,7 +231,7 @@ export function Workspace({
           <button
             onClick={handleRun}
             disabled={running || !canRun}
-            title={canRun ? "Run (Ctrl/Cmd+Enter)" : "C++ execution coming soon"}
+            title={canRun ? "Run (Ctrl/Cmd+Enter)" : "This language can't run yet"}
             className="rounded-md bg-green-600 px-3 py-1 text-sm font-medium text-white hover:bg-green-500 disabled:opacity-50"
           >
             {running ? "Running…" : "▶ Run"}
@@ -239,7 +240,13 @@ export function Workspace({
       </div>
 
       <div className="min-h-0 flex-1">
-        <CodeEditor language={language} value={code} onChange={handleChange} />
+        <CodeEditor
+          language={language}
+          value={code}
+          onChange={handleChange}
+          onRun={handleRun}
+          onSave={handleSave}
+        />
       </div>
 
       {/* Run console */}
@@ -281,7 +288,7 @@ export function Workspace({
                 <span className="text-white/30">
                   {canRun
                     ? "Click Run to execute in a sandbox."
-                    : "C++ execution isn't available yet."}
+                    : "This language can't run yet."}
                 </span>
               )}
               {running && <span className="text-white/50">Running…</span>}

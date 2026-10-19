@@ -6,8 +6,8 @@ import type { Language } from "@/lib/types";
 /** Redis list that the worker drains (BRPOP). */
 export const EXEC_QUEUE = "codewithme:exec:jobs";
 
-/** Languages the sandbox can execute today (C++ comes with the judge). */
-export const RUNNABLE_LANGUAGES = ["python", "javascript"] as const satisfies readonly Language[];
+/** Languages the sandbox can execute (each needs a runtime in server/sandbox.ts). */
+export const RUNNABLE_LANGUAGES = ["python", "javascript", "cpp"] as const satisfies readonly Language[];
 export type RunnableLanguage = (typeof RUNNABLE_LANGUAGES)[number];
 
 export const isRunnable = (value: unknown): value is RunnableLanguage =>

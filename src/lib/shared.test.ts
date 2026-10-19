@@ -9,7 +9,8 @@ describe("language helpers", () => {
     expect(isLanguage("ruby")).toBe(false);
     expect(isRunnable("python")).toBe(true);
     expect(isRunnable("javascript")).toBe(true);
-    expect(isRunnable("cpp")).toBe(false);
+    expect(isRunnable("cpp")).toBe(true);
+    expect(isRunnable("ruby")).toBe(false);
     expect(isRunnable(undefined)).toBe(false);
   });
 });
