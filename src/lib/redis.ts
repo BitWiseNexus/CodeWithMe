@@ -1,5 +1,6 @@
 import "server-only";
 import Redis from "ioredis";
+import { RUN_STREAM, SUBMIT_STREAM, type QueueJob } from "@/lib/exec";
 
 /**
  * Shared ioredis connection for the Next.js server (route handlers). Reused
@@ -28,6 +29,20 @@ function createRedis() {
 export const redis = globalForRedis.redis ?? createRedis();
 
 if (process.env.NODE_ENV !== "production") globalForRedis.redis = redis;
+
+/** Adds a job to its stream (runs and submissions are queued separately). */
+export async function enqueueJob(job: QueueJob): Promise<void> {
+  const stream = job.type === "submit" ? SUBMIT_STREAM : RUN_STREAM;
+  // Approximate trimming keeps the stream bounded; processed entries are
+  // deleted by the worker anyway.
+  await redis.xadd(stream, "MAXLEN", "~", 10_000, "*", "job", JSON.stringify(job));
+}
+
+/** Jobs waiting or in progress, across both streams. */
+export async function queuedJobCount(): Promise<number> {
+  const [runs, submits] = await Promise.all([redis.xlen(RUN_STREAM), redis.xlen(SUBMIT_STREAM)]);
+  return runs + submits;
+}
 
 /**
  * Fixed-window rate limiter: allows `limit` hits per `windowSec` per key.

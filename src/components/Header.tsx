@@ -12,6 +12,11 @@ export async function Header() {
       </Link>
       {user && (
         <div className="flex items-center gap-3 text-sm">
+          {user.isAdmin && (
+            <Link href="/admin/problems" className="text-blue-600 hover:underline dark:text-blue-400">
+              Admin
+            </Link>
+          )}
           <span className="text-black/60 dark:text-white/60">{user.email}</span>
           <form action={signOut}>
             <button

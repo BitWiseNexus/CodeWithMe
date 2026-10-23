@@ -2,13 +2,11 @@ import { NextResponse, type NextRequest } from "next/server";
 import { getUser } from "@/lib/auth";
 import { problemExists } from "@/lib/db/problems";
 import { createSubmission, markSubmissionFailed } from "@/lib/db/submissions";
-import { rateLimit, redis } from "@/lib/redis";
-import { EXEC_QUEUE, MAX_CODE_CHARS, isRunnable, type SubmitJob } from "@/lib/exec";
+import { enqueueJob, queuedJobCount, rateLimit } from "@/lib/redis";
+import { MAX_CODE_CHARS, MAX_QUEUED_JOBS, isRunnable, type SubmitJob } from "@/lib/exec";
 
 /** Per-user submissions allowed per minute (each one runs every test). */
 const SUBMITS_PER_MINUTE = 6;
-/** Refuse new jobs when this many are already waiting (worker is backed up). */
-const MAX_QUEUE_LENGTH = 50;
 
 const unavailable = () =>
   NextResponse.json(
@@ -51,7 +49,7 @@ export async function POST(request: NextRequest) {
         { status: 429, headers: { "Retry-After": String(limited.retryAfterSec) } }
       );
     }
-    if ((await redis.llen(EXEC_QUEUE)) >= MAX_QUEUE_LENGTH) {
+    if ((await queuedJobCount()) >= MAX_QUEUED_JOBS) {
       return NextResponse.json(
         { error: "The judge is busy. Please try again in a moment." },
         { status: 503 }
@@ -88,7 +86,7 @@ export async function POST(request: NextRequest) {
     code,
   };
   try {
-    await redis.lpush(EXEC_QUEUE, JSON.stringify(job));
+    await enqueueJob(job);
   } catch {
     await markSubmissionFailed(submissionId, "Could not queue the job").catch(() => {});
     return unavailable();

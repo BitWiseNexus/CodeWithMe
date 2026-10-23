@@ -7,6 +7,7 @@
     "server": "tsx watch --clear-screen=false --env-file=.env.local server/index.ts",
     "worker": "tsx watch --clear-screen=false --env-file=.env.local server/worker.ts",
     "seed": "tsx --env-file=.env.local scripts/seed.ts",
+    "set-admin": "tsx --env-file=.env.local scripts/set-admin.ts",
     "sandbox:images": "docker pull python:3.12-alpine && docker pull node:20-alpine && docker build -t codewithme-cpp sandbox/cpp",
     "dev:all": "concurrently -n next,server,worker -c blue,green,magenta \"npm:dev\" \"npm:server\" \"npm:worker\"",
     "build": "next build",

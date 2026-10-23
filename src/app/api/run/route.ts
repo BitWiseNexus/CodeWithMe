@@ -2,9 +2,9 @@ import { NextResponse, type NextRequest } from "next/server";
 import { getUser } from "@/lib/auth";
 import { createExecution, markExecutionFailed } from "@/lib/db/executions";
 import { problemExists } from "@/lib/db/problems";
-import { rateLimit, redis } from "@/lib/redis";
+import { enqueueJob, queuedJobCount, rateLimit } from "@/lib/redis";
 import {
-  EXEC_QUEUE,
+  MAX_QUEUED_JOBS,
   MAX_CODE_CHARS,
   MAX_STDIN_CHARS,
   isRunnable,
@@ -13,8 +13,6 @@ import {
 
 /** Per-user runs allowed per minute. */
 const RUNS_PER_MINUTE = 10;
-/** Refuse new jobs when this many are already waiting (worker is backed up). */
-const MAX_QUEUE_LENGTH = 50;
 
 const unavailable = () =>
   NextResponse.json(
@@ -67,7 +65,7 @@ export async function POST(request: NextRequest) {
         { status: 429, headers: { "Retry-After": String(limited.retryAfterSec) } }
       );
     }
-    if ((await redis.llen(EXEC_QUEUE)) >= MAX_QUEUE_LENGTH) {
+    if ((await queuedJobCount()) >= MAX_QUEUED_JOBS) {
       return NextResponse.json(
         { error: "The runner is busy. Please try again in a moment." },
         { status: 503 }
@@ -97,10 +95,10 @@ export async function POST(request: NextRequest) {
     );
   }
 
-  // Enqueue the job for the worker. LPUSH + BRPOP = FIFO.
+  // Enqueue the job for the worker (a Redis Stream; see src/lib/exec.ts).
   const job: ExecJob = { executionId, userId: user.id, language, code, stdin };
   try {
-    await redis.lpush(EXEC_QUEUE, JSON.stringify(job));
+    await enqueueJob(job);
   } catch {
     // Don't leave the execution stuck in "queued" forever.
     await markExecutionFailed(executionId, "Could not queue the job").catch(() => {});

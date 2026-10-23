@@ -12,7 +12,7 @@ import {
 import { io, type Socket } from "socket.io-client";
 import { CodeEditor } from "@/components/CodeEditor";
 import { VerdictView, type SubmitState } from "@/components/VerdictView";
-import { saveCode } from "@/app/problems/[slug]/actions";
+import { saveCode, type SaveResult } from "@/app/problems/[slug]/actions";
 import { LANGUAGES, STARTER_CODE, type Language } from "@/lib/types";
 import { isRunnable, type ExecResult } from "@/lib/exec";
 import type { SubmissionResult } from "@/lib/judge";
@@ -37,6 +37,8 @@ const POLL_AFTER_MS = 10_000;
 const POLL_EVERY_MS = 5_000;
 /** Stop waiting entirely (worker likely offline). Judging takes longer. */
 const GIVE_UP_AFTER_MS = { run: 60_000, submit: 180_000 };
+/** Drafts save themselves this long after the last edit. */
+const AUTOSAVE_MS = 5_000;
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -110,6 +112,11 @@ export function Workspace({
   const [isPending, startTransition] = useTransition();
   /** Languages with edits that haven't been saved yet. */
   const dirtyRef = useRef<Set<Language>>(new Set());
+  /** Latest buffers, for saves that finish after more typing. */
+  const buffersRef = useRef(buffers);
+  useEffect(() => {
+    buffersRef.current = buffers;
+  }, [buffers]);
   const socketRef = useRef<Socket | null>(null);
   const jobRef = useRef<Job | null>(null);
   const onFinishedRef = useRef(onSubmissionFinished);
@@ -234,17 +241,43 @@ export function Workspace({
     [language]
   );
 
+  /**
+   * Saves one language's code. Its "unsaved" flag is only cleared if the
+   * editor still holds exactly what was saved (no typing during the save).
+   */
+  const persist = useCallback(
+    async (l: Language, text: string): Promise<SaveResult> => {
+      const result = await saveCode({ problemId, language: l, code: text });
+      if (result.ok && buffersRef.current[l] === text) dirtyRef.current.delete(l);
+      return result;
+    },
+    [problemId]
+  );
+
   const handleSave = useCallback(() => {
     startTransition(async () => {
-      const result = await saveCode({ problemId, language, code });
-      if (result.ok) {
-        dirtyRef.current.delete(language);
-        setStatus(`Saved ${new Date(result.savedAt).toLocaleTimeString()}`);
-      } else {
-        setStatus(`Error: ${result.error}`);
-      }
+      const result = await persist(language, code);
+      setStatus(
+        result.ok ? `Saved ${new Date(result.savedAt).toLocaleTimeString()}` : `Error: ${result.error}`
+      );
     });
-  }, [problemId, language, code]);
+  }, [persist, language, code]);
+
+  // Autosave: AUTOSAVE_MS after the last edit, save every language with
+  // unsaved changes — so leaving the page (even via an in-app link) can't
+  // lose more than a few seconds of work.
+  useEffect(() => {
+    if (dirtyRef.current.size === 0) return;
+    const timer = setTimeout(async () => {
+      const dirty = [...dirtyRef.current];
+      const results = await Promise.all(dirty.map((l) => persist(l, buffersRef.current[l])));
+      const failed = results.find((r): r is Extract<SaveResult, { ok: false }> => !r.ok);
+      setStatus(
+        failed ? `Autosave failed: ${failed.error}` : `Autosaved ${new Date().toLocaleTimeString()}`
+      );
+    }, AUTOSAVE_MS);
+    return () => clearTimeout(timer);
+  }, [buffers, persist]);
 
   const handleReset = useCallback(() => {
     if (!window.confirm("Replace your code with the starter code for this language?")) return;

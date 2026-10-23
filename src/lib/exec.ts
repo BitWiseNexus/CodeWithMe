@@ -3,8 +3,20 @@ import type { Language } from "@/lib/types";
 // Shared by the Next.js app, the realtime server and the worker (server/ imports
 // this via the `@/` alias), so keep it free of "server-only" and Node APIs.
 
-/** Redis list that the worker drains (BRPOP). Carries both runs and submissions. */
-export const EXEC_QUEUE = "codewithme:exec:jobs";
+/**
+ * Job queues: Redis Streams read by a consumer group, so a job stays pending
+ * (and is retried) until a worker acknowledges it. Runs and submissions use
+ * separate streams so runs (quick, interactive) can go first.
+ */
+export const RUN_STREAM = "codewithme:jobs:run";
+export const SUBMIT_STREAM = "codewithme:jobs:submit";
+export const JOB_GROUP = "workers";
+
+/** The old Redis list queue (before streams); the worker migrates leftovers. */
+export const LEGACY_QUEUE = "codewithme:exec:jobs";
+
+/** Refuse new jobs when this many are waiting or running (worker backed up). */
+export const MAX_QUEUED_JOBS = 50;
 
 /** Languages the sandbox can execute (each needs a runtime in server/sandbox.ts). */
 export const RUNNABLE_LANGUAGES = ["python", "javascript", "cpp"] as const satisfies readonly Language[];

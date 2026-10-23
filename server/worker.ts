@@ -1,8 +1,8 @@
-import Redis from "ioredis";
+import { hostname } from "node:os";
 import { io as ioClient } from "socket.io-client";
 import { FieldValue } from "firebase-admin/firestore";
 import {
-  EXEC_QUEUE,
+  RUN_STREAM,
   isRunnable,
   type ExecJob,
   type ExecResult,
@@ -18,14 +18,26 @@ import {
 import { requireWorkerSecret } from "./config";
 import { getAdminDb } from "./firebaseAdmin";
 import { judge, type JudgeTest } from "./judge";
+import { JobQueue, byPriority, type Delivery } from "./queue";
 import { removeOrphanedContainers, runBatch, runInSandbox } from "./sandbox";
 
 // --- config ---
 const REDIS_URL = process.env.REDIS_URL ?? "redis://localhost:6379";
 const SOCKET_URL = process.env.NEXT_PUBLIC_SOCKET_URL ?? "http://localhost:3001";
 const WORKER_SECRET = requireWorkerSecret();
-/** BRPOP block time. Longer = fewer idle Redis commands (matters on Upstash). */
-const POLL_SECONDS = 30;
+/**
+ * Stable name in the consumer group: after a crash/restart this worker picks
+ * up the jobs it had taken. Give each worker on the same host its own id.
+ */
+const WORKER_ID = process.env.WORKER_ID ?? `worker-${hostname()}`;
+/** Jobs (containers) run at the same time. Each container gets 0.5 CPU. */
+const CONCURRENCY = Math.max(1, Number(process.env.WORKER_CONCURRENCY ?? 2));
+/** Blocking read time. Longer = fewer idle Redis commands (matters on Upstash). */
+const BLOCK_MS = 30_000;
+/** Give up on a job after this many deliveries (it keeps crashing workers). */
+const MAX_DELIVERIES = 3;
+/** Jobs held this long by another consumer are presumed lost and claimed. */
+const STALE_MS = 5 * 60_000;
 /** A slow/unavailable Firestore must not stall the queue. */
 const DB_WRITE_TIMEOUT_MS = 10_000;
 /** Problems + tests are cached briefly to save Firestore reads on repeat submits. */
@@ -40,9 +52,7 @@ process.on("unhandledRejection", (e) =>
 // Admin SDK: writes results directly (clients have no Firestore access).
 const db = getAdminDb();
 
-// Dedicated connection for the blocking BRPOP.
-const redis = new Redis(REDIS_URL);
-redis.on("error", (e) => console.error("[worker] redis:", e.message));
+const queue = new JobQueue(REDIS_URL, WORKER_ID);
 
 // Persistent socket to the /worker namespace so we can push results.
 const socket = ioClient(`${SOCKET_URL}/worker`, {
@@ -232,29 +242,130 @@ function parseJob(raw: string): QueueJob | null {
   }
 }
 
+/** Gives up on a job that keeps failing: tell the browser and record the error. */
+async function failJob(job: QueueJob, message: string) {
+  const finished_at = FieldValue.serverTimestamp();
+  if (job.type === "submit") {
+    const result: SubmissionResult = {
+      submissionId: job.submissionId,
+      status: "error",
+      verdict: null,
+      passed: 0,
+      total: 0,
+      timeMs: null,
+      error: message,
+    };
+    socket.emit("submission", result);
+    await bestEffort(job.submissionId, () =>
+      db.collection("submissions").doc(job.submissionId).update({ status: "error", error: message, finished_at })
+    );
+  } else {
+    const result: ExecResult = {
+      executionId: job.executionId,
+      status: "error",
+      stdout: "",
+      stderr: message,
+      exitCode: null,
+    };
+    socket.emit("result", result);
+    await bestEffort(job.executionId, () =>
+      db.collection("executions").doc(job.executionId).update({ status: "error", error: message, finished_at })
+    );
+  }
+}
+
+/** Processes one delivery, then acknowledges it (removing it from the queue). */
+async function handle(d: Delivery) {
+  const job = parseJob(d.raw);
+  try {
+    if (!job) {
+      console.error("[worker] dropping malformed job:", d.raw.slice(0, 200));
+    } else if (d.deliveries > MAX_DELIVERIES) {
+      console.error(`[worker] giving up on ${d.id} after ${d.deliveries - 1} attempts`);
+      await failJob(job, "This job failed repeatedly and was dropped. Please try again.");
+    } else {
+      if (d.deliveries > 1) console.log(`[worker] retrying ${d.id} (attempt ${d.deliveries})`);
+      await (job.type === "submit" ? processSubmit(job) : processRun(job));
+    }
+  } catch (e) {
+    console.error("[worker] job failed:", e);
+  }
+  // Ack even after an error: the job ran and reported back. Redelivery is for
+  // jobs whose worker died before getting here.
+  await queue.ack(d).catch((e) => console.error(`[worker] ack failed for ${d.id}:`, e.message));
+}
+
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+/** Deliveries taken from Redis but not started yet (runs first). */
+const buffer: Delivery[] = [];
+const inFlight = new Set<Promise<void>>();
+let stopping = false;
+
 async function main() {
   const removed = await removeOrphanedContainers();
   if (removed) console.log(`[worker] removed ${removed} orphaned sandbox container(s)`);
 
-  console.log("[worker] waiting for jobs on", EXEC_QUEUE);
-  for (;;) {
-    try {
-      // BRPOP returns [key, value] or null on timeout.
-      const res = await redis.brpop(EXEC_QUEUE, POLL_SECONDS);
-      if (!res) continue;
-      const job = parseJob(res[1]);
-      if (!job) {
-        console.error("[worker] dropping malformed job:", res[1].slice(0, 200));
-        continue;
-      }
-      // Run jobs sequentially for simplicity; one container at a time.
-      const work = job.type === "submit" ? processSubmit(job) : processRun(job);
-      await work.catch((e) => console.error("[worker] job failed:", e));
-    } catch (e) {
-      console.error("[worker] loop error:", e);
-      await new Promise((r) => setTimeout(r, 1000));
+  await queue.init();
+  // Jobs this worker had taken before it stopped (crash, restart) come first.
+  const recovered = await queue.ownPending();
+  if (recovered.length) console.log(`[worker] resuming ${recovered.length} unfinished job(s)`);
+  buffer.push(...recovered);
+
+  // Jobs held too long by a worker that never came back.
+  setInterval(() => {
+    queue
+      .claimStale(STALE_MS)
+      .then((claimed) => {
+        if (!claimed.length) return;
+        console.log(`[worker] claimed ${claimed.length} stale job(s)`);
+        buffer.push(...claimed);
+        buffer.sort(byPriority);
+      })
+      .catch((e) => console.error("[worker] claim failed:", e.message));
+  }, 60_000).unref();
+
+  console.log(`[worker] ${WORKER_ID} ready — up to ${CONCURRENCY} job(s) at a time`);
+  while (!stopping) {
+    if (inFlight.size >= CONCURRENCY) {
+      await Promise.race(inFlight);
+      continue;
     }
+    let next: Delivery | undefined;
+    try {
+      // A waiting run overtakes buffered submissions.
+      if (buffer.length && buffer[0].stream !== RUN_STREAM) {
+        const run = await queue.nextRunNow();
+        if (run) buffer.unshift(run);
+      }
+      if (!buffer.length) buffer.push(...(await queue.next(BLOCK_MS)));
+      next = buffer.shift();
+    } catch (e) {
+      if (stopping) break;
+      console.error("[worker] queue error:", e instanceof Error ? e.message : e);
+      await sleep(1000);
+      continue;
+    }
+    if (!next || stopping) continue;
+
+    const work: Promise<void> = handle(next).finally(() => inFlight.delete(work));
+    inFlight.add(work);
   }
 }
 
-main();
+/** Finish running jobs (bounded), then exit. Unfinished ones resume on restart. */
+async function shutdown(signal: string) {
+  if (stopping) return;
+  stopping = true;
+  console.log(`[worker] ${signal}: finishing ${inFlight.size} job(s)…`);
+  await Promise.race([Promise.allSettled([...inFlight]), sleep(30_000)]);
+  queue.disconnect();
+  process.exit(0);
+}
+process.on("SIGINT", () => void shutdown("SIGINT"));
+process.on("SIGTERM", () => void shutdown("SIGTERM"));
+
+main().catch((e) => {
+  console.error("[worker] fatal:", e);
+  process.exit(1);
+});

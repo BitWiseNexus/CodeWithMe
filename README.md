@@ -165,6 +165,24 @@ Open [http://localhost:3000](http://localhost:3000). You'll be redirected to
    failed **hidden** test only shows its number.
 4. The **Submissions** tab lists your attempts; *Open in editor* loads old code.
    Solved problems get a ✓ on the problem list. Limit: 6 submissions/minute.
+5. Drafts **autosave** 5 s after you stop typing (and Ctrl/Cmd+S still saves
+   right away).
+
+### Add and edit problems (admin)
+
+```bash
+npm run set-admin -- you@example.com      # add --remove to take it away
+```
+
+Sign out and back in (the session picks up the admin claim at sign-in). An
+**Admin** link appears in the header → `/admin/problems`, where you can create,
+edit and delete problems: statement (Markdown, with preview), input/output
+format, constraints, time limit, comparator, starter code per language, and
+sample + hidden tests (or paste them as JSON). Non-admins get a 404 on these
+pages, and every admin Server Action re-checks the claim. After saving, open the
+problem and Submit a reference solution to confirm the tests. The judge picks
+up edits within a minute. Note that `npm run seed` overwrites the three problems
+defined in `scripts/problems.ts`.
 
 ## Project structure
 
@@ -172,7 +190,8 @@ Open [http://localhost:3000](http://localhost:3000). You'll be redirected to
 server/
   index.ts                      # Socket.IO presence/cursors + /worker relay (:3001)
   signaling.ts                  # self-hosted y-webrtc signaling relay (:4444)
-  worker.ts                     # drains Redis queue: runs + submissions → results
+  worker.ts                     # job loop: N at a time, runs first, crash recovery
+  queue.ts                      # Redis Streams consumer (pending, retry, claim)
   sandbox.ts                    # docker run flags, run + judge runner scripts, caps
   judge.ts                      # samples then hidden tests → verdict (pure, tested)
   config.ts                     # WORKER_SECRET (required in production)
@@ -180,6 +199,7 @@ server/
 sandbox/cpp/Dockerfile          # C++ image (g++ + precompiled <bits/stdc++.h>)
 scripts/problems.ts             # problem definitions + tests (reference solutions)
 scripts/seed.ts                 # syncs problems.ts into Firestore
+scripts/set-admin.ts            # grants/removes the admin custom claim
 src/
   proxy.ts                      # Next 16 "middleware": session check + guards
   lib/
@@ -189,8 +209,9 @@ src/
     firebase/admin.ts           # Admin SDK (auth + Firestore), server-only
     firebase/client.ts          # client SDK, used only to sign in
     firebase/proxy.ts           # session-cookie verification for proxy.ts
-    auth.ts                     # requireUser() / getUser() DAL helpers
-    redis.ts                    # shared ioredis connection + rateLimit()
+    auth.ts                     # getUser() / requireUser() / requireAdmin()
+    redis.ts                    # ioredis connection, enqueueJob(), rateLimit()
+    problem-input.ts            # validation for admin problem edits (tested)
     redirect.ts                 # safeRedirect() for post-login redirects
     types.ts                    # shared types, language list, starter code
     collab.ts                   # room types, room-id check, color helper
@@ -204,7 +225,8 @@ src/
     Markdown.tsx                # problem statements (no raw HTML)
     CollaborativeEditor.tsx     # Yjs+y-webrtc text sync + Socket.IO cursors
     CreateRoomButton.tsx        # spins up a new /room/<id>
-    Header.tsx                  # nav + sign out
+    Header.tsx                  # nav + Admin link + sign out
+    admin/ProblemEditor.tsx     # create/edit problems and tests
   app/
     api/run/route.ts            # POST: rate-limit, insert execution, enqueue job
     api/executions/[id]/        # GET: run status/result (polling fallback)
@@ -212,6 +234,7 @@ src/
     api/submissions/[id]/       # GET: verdict + code (owner only)
     login/                      # auth page, form, session-cookie actions
     problems/                   # list + [slug] detail with editor
+    admin/problems/             # admin: list, new, [slug]/edit (+ actions.ts)
     room/[id]/                  # collaborative session page
 firestore.rules                 # deny-all client rules (server-only access)
 firestore.indexes.json          # index for the submission history query
@@ -234,15 +257,27 @@ Each "Run" goes through an async queue so a slow/malicious program never blocks
 the web server:
 
 ```
-Browser ──POST /api/run──▶ Next route ──LPUSH──▶ Redis queue
-                                                     │ BRPOP
+Browser ──POST /api/run──▶ Next route ──XADD──▶ Redis Stream (runs | submissions)
+                                                     │ XREADGROUP (consumer group)
                                                      ▼
                               Worker ──docker run (sandbox)──▶ result
-                                 │ write to Firestore (Admin SDK)
                                  │ emit "result" to /worker namespace
+                                 │ write to Firestore (Admin SDK), then XACK
                                  ▼
         Browser ◀──"execution:result"── Socket.IO server (exec:<id> room)
 ```
+
+The queue is **reliable**: a job stays *pending* in the Redis consumer group
+until the worker acknowledges it after finishing.
+- **Crash recovery:** if the worker dies mid-job, it picks the job up again on
+  restart (same `WORKER_ID`).
+- **Dead workers:** jobs held more than 5 minutes by a worker that never comes
+  back are claimed by another worker.
+- **Retry limit:** a job that keeps failing is dropped after 3 attempts, with an
+  error sent to the browser.
+- **Parallelism:** the worker runs `WORKER_CONCURRENCY` jobs at once (default 2).
+- **Priority:** runs and submissions use separate streams, so a quick Run never
+  waits behind a queue of submissions.
 
 Container lockdown (`server/sandbox.ts`): `--network none`, `--memory 256m`
 (no swap), `--cpus 0.5`, `--pids-limit 64`, `--read-only` root + small
@@ -288,8 +323,8 @@ remote cursors and no text conflicts.
 queue + worker, with output streamed back over Socket.IO.
 ✅ **Phase 4** — stabilised: no stuck runs, rate limits, hardened sandbox,
 data-access layer, tests + CI, C++.
-🟡 **Phase 5** — judge with verdicts, hidden tests, history and solved marks.
-Still to do: reliable queue + concurrency, admin problem editor, autosave.
+✅ **Phase 5** — judge with verdicts, hidden tests, history and solved marks;
+reliable job queue with parallel workers; admin problem editor; draft autosave.
 
 ## Next
 
