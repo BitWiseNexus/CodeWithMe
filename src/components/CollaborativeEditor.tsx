@@ -2,13 +2,14 @@
 
 import { useEffect, useRef, useState } from "react";
 import Editor from "@monaco-editor/react";
-import { io, type Socket } from "socket.io-client";
+import type { Socket } from "socket.io-client";
+import { connectRealtime, fetchRealtimeToken } from "@/lib/realtime-client";
 import type { editor as MonacoEditor, IDisposable } from "monaco-editor";
 import {
   LANGUAGES,
   type Language,
 } from "@/lib/types";
-import type { RemoteCursor, RoomUser } from "@/lib/collab";
+import { signalingUrlFor, type RemoteCursor, type RoomUser } from "@/lib/collab";
 
 type Monaco = typeof import("monaco-editor");
 
@@ -34,14 +35,11 @@ function ensureSelectionStyle(color: string) {
 
 export function CollaborativeEditor({
   roomId,
-  user,
   socketUrl,
-  signalingUrl,
 }: {
   roomId: string;
-  user: { name: string; color: string };
+  /** Realtime server; signaling lives on the same origin at /signal. */
   socketUrl: string;
-  signalingUrl: string;
 }) {
   const [language, setLanguage] = useState<Language>("javascript");
   const [peers, setPeers] = useState<RoomUser[]>([]);
@@ -61,10 +59,14 @@ export function CollaborativeEditor({
     const { WebrtcProvider } = await import("y-webrtc");
     const { MonacoBinding } = await import("y-monaco");
 
+    // Signaling and Socket.IO both require a token from /api/realtime-token;
+    // our name and colour come from it, not from this page.
+    const token = await fetchRealtimeToken();
+
     const ydoc = new Y.Doc();
     // Namespace the WebRTC room so different deployments don't collide.
     const provider = new WebrtcProvider(`codewithme-${roomId}`, ydoc, {
-      signaling: [signalingUrl],
+      signaling: [signalingUrlFor(socketUrl, token)],
     });
     provider.on("synced", () => setSynced(true));
 
@@ -85,10 +87,10 @@ export function CollaborativeEditor({
     else applyLanguage();
 
     // --- Socket.IO: presence + cursors ---
-    const socket = io(socketUrl, { transports: ["websocket"] });
+    const socket = connectRealtime(socketUrl);
     socketRef.current = socket;
     socket.on("connect", () => {
-      socket.emit("join", { roomId, user });
+      socket.emit("join", { roomId });
     });
     socket.on("presence", (list: RoomUser[]) => setPeers(list));
     socket.on("cursor", (rc: RemoteCursor) =>

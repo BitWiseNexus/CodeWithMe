@@ -19,14 +19,10 @@ const CollaborativeEditor = dynamic(
 
 export function RoomClient({
   roomId,
-  user,
   socketUrl,
-  signalingUrl,
 }: {
   roomId: string;
-  user: { name: string; color: string };
   socketUrl: string;
-  signalingUrl: string;
 }) {
   const [copied, setCopied] = useState(false);
 
@@ -58,9 +54,7 @@ export function RoomClient({
       <div className="min-h-0 flex-1">
         <CollaborativeEditor
           roomId={roomId}
-          user={user}
           socketUrl={socketUrl}
-          signalingUrl={signalingUrl}
         />
       </div>
     </div>

@@ -99,7 +99,7 @@ async function processRun(job: ExecJob) {
   };
 
   // Deliver first; the stored copy is for the polling fallback and history.
-  socket.emit("result", result);
+  socket.emit("result", result, job.userId); // owner: only they receive it
   console.log(`[worker] done ${job.executionId} (exit ${outcome.exitCode})`);
 
   // Keep writes ordered so "running" can never land after the final status.
@@ -193,7 +193,7 @@ async function processSubmit(job: SubmitJob) {
     };
   }
 
-  socket.emit("submission", result);
+  socket.emit("submission", result, job.userId);
   console.log(
     `[worker] judged ${job.submissionId}: ${result.verdict ?? result.status} (${result.passed}/${result.total})`
   );
@@ -255,7 +255,7 @@ async function failJob(job: QueueJob, message: string) {
       timeMs: null,
       error: message,
     };
-    socket.emit("submission", result);
+    socket.emit("submission", result, job.userId);
     await bestEffort(job.submissionId, () =>
       db.collection("submissions").doc(job.submissionId).update({ status: "error", error: message, finished_at })
     );
@@ -267,7 +267,7 @@ async function failJob(job: QueueJob, message: string) {
       stderr: message,
       exitCode: null,
     };
-    socket.emit("result", result);
+    socket.emit("result", result, job.userId);
     await bestEffort(job.executionId, () =>
       db.collection("executions").doc(job.executionId).update({ status: "error", error: message, finished_at })
     );

@@ -4,6 +4,7 @@ import { useActionState } from "react";
 import { FirebaseError } from "firebase/app";
 import {
   createUserWithEmailAndPassword,
+  sendPasswordResetEmail,
   signInWithEmailAndPassword,
   signOut as signOutClient,
 } from "firebase/auth";
@@ -67,6 +68,23 @@ const signIn = (_prev: AuthState, formData: FormData) =>
 const signUp = (_prev: AuthState, formData: FormData) =>
   authenticate("signUp", formData);
 
+type ResetState = { error?: string; info?: string } | undefined;
+
+/** Emails a password-reset link (Firebase sends it and hosts the reset page). */
+async function resetPassword(_prev: ResetState, formData: FormData): Promise<ResetState> {
+  const email = String(formData.get("email") ?? "").trim();
+  if (!email) return { error: "Enter your email above, then click “Forgot password?”." };
+  try {
+    await sendPasswordResetEmail(await getClientAuth(), email);
+  } catch (e) {
+    // "user not found" is deliberately reported as success (no account probing).
+    if (!(e instanceof FirebaseError && e.code === "auth/user-not-found")) {
+      return { error: authErrorMessage(e) };
+    }
+  }
+  return { info: "If an account exists for that email, a reset link is on its way. Check your inbox (and spam)." };
+}
+
 export function AuthForm({ redirectTo }: { redirectTo: string }) {
   const [signInState, signInAction, signingIn] = useActionState<
     AuthState,
@@ -77,8 +95,13 @@ export function AuthForm({ redirectTo }: { redirectTo: string }) {
     FormData
   >(signUp, undefined);
 
-  const message = signInState?.error ?? signUpState?.error;
-  const pending = signingIn || signingUp;
+  const [resetState, resetAction, resetting] = useActionState<ResetState, FormData>(
+    resetPassword,
+    undefined
+  );
+
+  const message = signInState?.error ?? signUpState?.error ?? resetState?.error;
+  const pending = signingIn || signingUp || resetting;
 
   return (
     <form className="flex flex-col gap-4">
@@ -115,6 +138,11 @@ export function AuthForm({ redirectTo }: { redirectTo: string }) {
           {message}
         </p>
       )}
+      {resetState?.info && !message && (
+        <p className="text-sm text-green-600 dark:text-green-400" role="status">
+          {resetState.info}
+        </p>
+      )}
 
       <div className="flex gap-3">
         <button
@@ -134,6 +162,16 @@ export function AuthForm({ redirectTo }: { redirectTo: string }) {
           {signingUp ? "Creating…" : "Sign up"}
         </button>
       </div>
+
+      <button
+        type="submit"
+        formAction={resetAction}
+        formNoValidate // only the email is needed
+        disabled={pending}
+        className="self-center text-xs text-black/60 hover:underline disabled:opacity-50 dark:text-white/60"
+      >
+        {resetting ? "Sending…" : "Forgot password?"}
+      </button>
     </form>
   );
 }

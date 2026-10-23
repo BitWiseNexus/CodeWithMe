@@ -12,6 +12,21 @@ export interface RoomUser {
  */
 export const roomChannel = (roomId: string) => `room:${roomId}`;
 
+/** Path of the y-webrtc signaling endpoint on the realtime server. */
+export const SIGNALING_PATH = "/signal";
+
+/**
+ * The signaling endpoint shares the realtime server's port:
+ * http(s)://host:port → ws(s)://host:port/signal?token=…
+ */
+export function signalingUrlFor(socketUrl: string, token: string): string {
+  const url = new URL(socketUrl);
+  url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
+  url.pathname = SIGNALING_PATH;
+  url.search = `?token=${encodeURIComponent(token)}`;
+  return url.toString();
+}
+
 /** Room ids are URL-safe tokens; anything else is rejected by page and server. */
 export const isValidRoomId = (id: unknown): id is string =>
   typeof id === "string" && /^[A-Za-z0-9_-]{1,64}$/.test(id);

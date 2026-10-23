@@ -1,6 +1,6 @@
 import { notFound } from "next/navigation";
 import { requireUser } from "@/lib/auth";
-import { colorFor, isValidRoomId } from "@/lib/collab";
+import { isValidRoomId } from "@/lib/collab";
 import { RoomClient } from "./RoomClient";
 
 export default async function RoomPage({
@@ -9,20 +9,15 @@ export default async function RoomPage({
   params: Promise<{ id: string }>;
 }) {
   const { id } = await params;
-  const authUser = await requireUser();
+  await requireUser();
   if (!isValidRoomId(id)) {
     notFound();
   }
 
-  const name = authUser.email?.split("@")[0] ?? "anon";
-  const user = { name, color: colorFor(authUser.email ?? authUser.id) };
-
   return (
     <RoomClient
       roomId={id}
-      user={user}
       socketUrl={process.env.NEXT_PUBLIC_SOCKET_URL ?? "http://localhost:3001"}
-      signalingUrl={process.env.NEXT_PUBLIC_SIGNALING_URL ?? "ws://localhost:4444"}
     />
   );
 }

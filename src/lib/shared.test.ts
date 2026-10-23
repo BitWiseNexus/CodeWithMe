@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { colorFor, isValidRoomId, roomChannel } from "@/lib/collab";
+import { colorFor, isValidRoomId, roomChannel, signalingUrlFor } from "@/lib/collab";
 import { execRoom, isRunnable } from "@/lib/exec";
 import { isLanguage } from "@/lib/types";
 
@@ -26,6 +26,13 @@ describe("realtime room names", () => {
     expect(isValidRoomId("exec:abc")).toBe(false);
     expect(isValidRoomId("")).toBe(false);
     expect(isValidRoomId("x".repeat(65))).toBe(false);
+  });
+});
+
+describe("signalingUrlFor", () => {
+  it("puts signaling on the realtime server's own origin", () => {
+    expect(signalingUrlFor("http://localhost:3001", "a.b")).toBe("ws://localhost:3001/signal?token=a.b");
+    expect(signalingUrlFor("https://rt.example.com", "x y")).toBe("wss://rt.example.com/signal?token=x%20y");
   });
 });
 

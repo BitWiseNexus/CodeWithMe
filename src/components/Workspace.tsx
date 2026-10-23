@@ -9,7 +9,8 @@ import {
   useTransition,
   type Ref,
 } from "react";
-import { io, type Socket } from "socket.io-client";
+import type { Socket } from "socket.io-client";
+import { connectRealtime } from "@/lib/realtime-client";
 import { CodeEditor } from "@/components/CodeEditor";
 import { VerdictView, type SubmitState } from "@/components/VerdictView";
 import { saveCode, type SaveResult } from "@/app/problems/[slug]/actions";
@@ -157,7 +158,7 @@ export function Workspace({
 
   // Persistent socket connection to receive run results and verdicts.
   useEffect(() => {
-    const socket = io(socketUrl, { transports: ["websocket"] });
+    const socket = connectRealtime(socketUrl);
     socketRef.current = socket;
     socket.on("execution:result", (result: ExecResult) => {
       const job = jobRef.current;

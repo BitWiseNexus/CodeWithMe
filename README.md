@@ -121,7 +121,7 @@ and the execution worker. Run them all at once:
 
 ```bash
 npm install
-npm run dev:all      # next (:3000) + server (:3001/:4444) + worker
+npm run dev:all      # next (:3000) + realtime server (:3001, signaling at /signal) + worker
 ```
 
 Or in separate terminals: `npm run dev`, `npm run server`, `npm run worker`.
@@ -189,7 +189,7 @@ defined in `scripts/problems.ts`.
 ```
 server/
   index.ts                      # Socket.IO presence/cursors + /worker relay (:3001)
-  signaling.ts                  # self-hosted y-webrtc signaling relay (:4444)
+  signaling.ts                  # y-webrtc signaling relay, same port at /signal
   worker.ts                     # job loop: N at a time, runs first, crash recovery
   queue.ts                      # Redis Streams consumer (pending, retry, claim)
   sandbox.ts                    # docker run flags, run + judge runner scripts, caps
@@ -247,11 +247,20 @@ firestore.indexes.json          # index for the submission history query
 - **Text** syncs peer-to-peer: `y-monaco` binds the Monaco model to a Yjs doc,
   which `y-webrtc` replicates between browsers. Conflict-free by construction
   (CRDT) — that's the "zero text-conflict" guarantee.
-- **WebRTC signaling** (peer discovery only, no text) runs on our own server in
-  `server/signaling.ts`, so we don't depend on flaky public signaling servers.
+- **WebRTC signaling** (peer discovery only, no text) runs on our own realtime
+  server (`server/signaling.ts`), on the **same port** at `/signal`, so there's
+  one public port to deploy and no dependence on flaky public servers.
 - **Presence & cursors** ride a separate Socket.IO channel (`server/index.ts`):
   each client broadcasts its caret/selection, and remote carets are rendered as
   Monaco content widgets + decorations.
+- **Authentication:** the realtime server is on another origin and can't read
+  the session cookie, so the browser fetches a signed token from
+  `/api/realtime-token` (HMAC, `REALTIME_SECRET`, valid 12 h).
+  - Socket.IO rejects connections without a valid token, and signaling returns
+    401 without one.
+  - Display names come from the token, never from the browser.
+  - Run and submission results only go to the user who started the job, even if
+    someone else watches the same id.
 
 ## How code execution stays safe
 

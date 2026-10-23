@@ -1,3 +1,4 @@
+import type { Server } from "node:http";
 import { WebSocketServer, WebSocket } from "ws";
 
 /**
@@ -9,7 +10,9 @@ import { WebSocketServer, WebSocket } from "ws";
  * `publish` message is forwarded to every *other* subscriber of that topic.
  *
  * This mirrors the reference server in `y-webrtc/bin/server.js` so we don't
- * depend on the (often-down) public signaling servers.
+ * depend on the (often-down) public signaling servers. It shares the realtime
+ * server's HTTP port (one public port to deploy), on its own path, and only
+ * accepts connections that carry a valid token (`?token=…`).
  */
 type SignalMessage = {
   type: "subscribe" | "unsubscribe" | "publish" | "ping" | "pong";
@@ -20,8 +23,23 @@ type SignalMessage = {
 
 const PING_TIMEOUT = 30_000;
 
-export function startSignalingServer(port: number) {
-  const wss = new WebSocketServer({ port });
+export function attachSignaling(
+  server: Server,
+  path: string,
+  authorize: (token: string | null) => boolean
+) {
+  const wss = new WebSocketServer({ noServer: true });
+
+  server.on("upgrade", (req, socket, head) => {
+    const url = new URL(req.url ?? "/", "http://localhost");
+    if (url.pathname !== path) return; // e.g. /socket.io/ — Socket.IO's upgrade
+    if (!authorize(url.searchParams.get("token"))) {
+      socket.write("HTTP/1.1 401 Unauthorized\r\nConnection: close\r\n\r\n");
+      socket.destroy();
+      return;
+    }
+    wss.handleUpgrade(req, socket, head, (ws) => wss.emit("connection", ws, req));
+  });
 
   // topic -> set of subscribed sockets
   const topics = new Map<string, Set<WebSocket>>();
@@ -109,6 +127,5 @@ export function startSignalingServer(port: number) {
     });
   });
 
-  console.log(`[signaling] y-webrtc signaling server on ws://localhost:${port}`);
   return wss;
 }
