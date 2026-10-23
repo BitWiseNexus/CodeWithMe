@@ -2,10 +2,15 @@ import type { Comparator, Verdict } from "@/lib/judge";
 
 export type Language = "python" | "cpp" | "javascript";
 
-export const LANGUAGES: { value: Language; label: string }[] = [
-  { value: "python", label: "Python" },
-  { value: "cpp", label: "C++" },
-  { value: "javascript", label: "JavaScript" },
+/**
+ * Every language the app knows. `monaco` is the editor's language id. To make a
+ * language runnable, also add it to RUNNABLE_LANGUAGES (src/lib/exec.ts) and
+ * give it a runtime in sandbox/runtimes.json.
+ */
+export const LANGUAGES: { value: Language; label: string; monaco: string }[] = [
+  { value: "python", label: "Python", monaco: "python" },
+  { value: "cpp", label: "C++", monaco: "cpp" },
+  { value: "javascript", label: "JavaScript", monaco: "javascript" },
 ];
 
 export const isLanguage = (value: unknown): value is Language =>

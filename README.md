@@ -193,9 +193,11 @@ server/
   worker.ts                     # job loop: N at a time, runs first, crash recovery
   queue.ts                      # Redis Streams consumer (pending, retry, claim)
   sandbox.ts                    # docker run flags, run + judge runner scripts, caps
+  runtimes.ts                   # loads + validates sandbox/runtimes.json
   judge.ts                      # samples then hidden tests → verdict (pure, tested)
   config.ts                     # WORKER_SECRET (required in production)
   firebaseAdmin.ts              # Admin SDK init for worker + seed script
+sandbox/runtimes.json           # per-language sandbox config (image, compile, run, limits)
 sandbox/cpp/Dockerfile          # C++ image (g++ + precompiled <bits/stdc++.h>)
 scripts/problems.ts             # problem definitions + tests (reference solutions)
 scripts/seed.ts                 # syncs problems.ts into Firestore
@@ -287,10 +289,17 @@ ulimits, `--cap-drop ALL`, `--security-opt no-new-privileges`, `--rm`, and an
 there's no command-line length limit, and the host filesystem is never
 mounted. stdout/stderr are capped at 64 KB each.
 
-C++ (`codewithme-cpp` image) compiles with `g++ -std=c++17 -O2` under its own
-15 s limit, then runs under the same 8 s limit. Its container gets 512 MB so the
-compiler has headroom, but the program itself is capped at 256 MB (`ulimit -v`).
-Its scratch dir allows executing the compiled binary; the Python and JS ones
+Languages are configured in [`sandbox/runtimes.json`](sandbox/runtimes.json),
+not in code. Each entry has an image (pulled, or built from a `build` context
+with build args), a source file name, an optional `compile` command and a `run`
+command, plus optional limits. The sandbox is generic: any runtime with a
+`compile` step is compiled under its own 15 s limit and may execute its binary
+from `/tmp`. If `compileMemoryMb` is larger than the program's memory, the
+container gets the extra room for the compiler while the program is still held
+to its own limit (`ulimit -v`). C++ is configured this way: the
+`codewithme-cpp` image bakes its `CXXFLAGS` build arg in as an env var, and both
+the precompiled header and the `compile` command use it, so the flags live in
+one place. Interpreted languages' scratch dirs stay `noexec`; the Python and JS ones
 don't.
 
 The worker sends the result before writing it to Firestore, and database

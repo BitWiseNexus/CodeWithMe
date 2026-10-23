@@ -1,0 +1,26 @@
+{
+  "$comment": "Sandbox runtime per language. server/sandbox.ts is generic: anything with a `compile` command is treated as a compiled language. Images with `build` are built locally by `npm run sandbox:images`; the rest are pulled. Commands run under busybox sh inside the image; the source file is written to /tmp/<source>.",
+  "python": {
+    "image": "python:3.12-alpine",
+    "source": "main.py",
+    "run": "python /tmp/main.py"
+  },
+  "javascript": {
+    "image": "node:20-alpine",
+    "source": "main.js",
+    "run": "node /tmp/main.js"
+  },
+  "cpp": {
+    "image": "codewithme-cpp",
+    "build": {
+      "context": "sandbox/cpp",
+      "args": { "CXXFLAGS": "-std=c++17 -O2" }
+    },
+    "source": "main.cpp",
+    "compile": "g++ $CXXFLAGS -pipe -o /tmp/main /tmp/main.cpp",
+    "run": "/tmp/main",
+    "compileMemoryMb": 512,
+    "scratchMb": 64,
+    "maxFileMb": 64
+  }
+}

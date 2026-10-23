@@ -98,11 +98,12 @@ export function Workspace({
 
   const [language, setLanguage] = useState<Language>(initialLanguage);
   // Per-language buffer so switching languages doesn't lose work.
-  const [buffers, setBuffers] = useState<Record<Language, string>>(() => ({
-    python: savedCode.python ?? starterFor("python"),
-    cpp: savedCode.cpp ?? starterFor("cpp"),
-    javascript: savedCode.javascript ?? starterFor("javascript"),
-  }));
+  const [buffers, setBuffers] = useState<Record<Language, string>>(
+    () =>
+      Object.fromEntries(
+        LANGUAGES.map(({ value: l }) => [l, savedCode[l] ?? starterFor(l)])
+      ) as Record<Language, string>
+  );
 
   const [status, setStatus] = useState<string>("");
   const [stdin, setStdin] = useState("");

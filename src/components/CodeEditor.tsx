@@ -2,13 +2,7 @@
 
 import { useEffect, useRef } from "react";
 import Editor, { type OnMount } from "@monaco-editor/react";
-import type { Language } from "@/lib/types";
-
-const MONACO_LANG: Record<Language, string> = {
-  python: "python",
-  cpp: "cpp",
-  javascript: "javascript",
-};
+import { LANGUAGES, type Language } from "@/lib/types";
 
 export function CodeEditor({
   language,
@@ -57,7 +51,7 @@ export function CodeEditor({
     <Editor
       height="100%"
       theme="vs-dark"
-      language={MONACO_LANG[language]}
+      language={LANGUAGES.find((l) => l.value === language)?.monaco ?? language}
       value={value}
       onChange={(v) => onChange(v ?? "")}
       onMount={handleMount}

@@ -3,65 +3,14 @@ import { randomUUID } from "node:crypto";
 import { createInterface } from "node:readline";
 import { MAX_OUTPUT_BYTES, type ExecJob, type RunnableLanguage } from "@/lib/exec";
 import { MAX_JUDGE_OUTPUT_BYTES, type TestRunRecord } from "@/lib/judge";
+import { RUNTIMES, type Runtime } from "./runtimes";
 
 /** Wall-clock limit for a Run (custom stdin). */
 export const RUN_TIMEOUT_S = 8;
-/** C++ only: separate wall-clock limit for compiling. */
+/** Wall-clock limit for the compile step of compiled languages. */
 const COMPILE_TIMEOUT_S = 15;
-/** Must match the flags the precompiled header was built with (sandbox/cpp/Dockerfile). */
-const CPP_FLAGS = "-std=c++17 -O2 -pipe";
-/** Programs get 256 MB, whatever the container size (C++ needs compiler headroom). */
-const PROGRAM_MEMORY_KB = 256 * 1024;
 /** A judged batch never runs longer than this, however many tests it has. */
 const MAX_BATCH_MS = 120_000;
-
-interface Runtime {
-  image: string;
-  /** Container memory. C++ gets extra headroom for the compiler. */
-  memory: string;
-  /** Writable scratch dir. Only C++ may execute files there (its binary). */
-  tmpfs: string;
-  /** Max size of any file written (RLIMIT_FSIZE), in bytes. */
-  maxFileBytes: number;
-  /** Source file name inside /tmp. */
-  file: string;
-  /** Compile command (compiled languages only); must exit non-zero on failure. */
-  compile?: string;
-  /** Command that runs the program. */
-  run: string;
-  /** Cap the program with `ulimit -v` (when the container itself is larger). */
-  limitMemory?: boolean;
-}
-
-const RUNTIMES: Record<RunnableLanguage, Runtime> = {
-  python: {
-    image: "python:3.12-alpine",
-    memory: "256m",
-    tmpfs: "/tmp:rw,size=16m,noexec,nosuid,nodev,mode=1777",
-    maxFileBytes: 1024 * 1024,
-    file: "main.py",
-    run: "python /tmp/main.py",
-  },
-  javascript: {
-    image: "node:20-alpine",
-    memory: "256m",
-    tmpfs: "/tmp:rw,size=16m,noexec,nosuid,nodev,mode=1777",
-    maxFileBytes: 1024 * 1024,
-    file: "main.js",
-    run: "node /tmp/main.js",
-  },
-  cpp: {
-    // Built locally from sandbox/cpp/Dockerfile (npm run sandbox:images).
-    image: "codewithme-cpp",
-    memory: "512m",
-    tmpfs: "/tmp:rw,exec,size=64m,nosuid,nodev,mode=1777",
-    maxFileBytes: 64 * 1024 * 1024,
-    file: "main.cpp",
-    compile: `g++ ${CPP_FLAGS} -o /tmp/main /tmp/main.cpp`,
-    run: "/tmp/main",
-    limitMemory: true,
-  },
-};
 
 // ---------------------------------------------------------------------------
 // Shell building blocks. Everything runs under busybox `sh` in the image.
@@ -72,12 +21,16 @@ const RUNTIMES: Record<RunnableLanguage, Runtime> = {
  * limited: ~32k chars on Windows, 128 KiB per argument on Linux).
  */
 const decodeSource = (rt: Runtime) =>
-  `read -r CODE && printf %s "$CODE" | base64 -d > /tmp/${rt.file} || exit 1`;
+  `read -r CODE && printf %s "$CODE" | base64 -d > /tmp/${rt.source} || exit 1`;
 
-/** The program under `timeout` (exits 137 when it kills), memory-capped if needed. */
+/**
+ * The program under `timeout` (exits 137 when it kills). When the container
+ * is bigger than the program's allowance (compiler headroom), `ulimit -v`
+ * holds the program itself to its limit.
+ */
 const timedProgram = (rt: Runtime, seconds: string) =>
-  rt.limitMemory
-    ? `(ulimit -v ${PROGRAM_MEMORY_KB}; exec timeout -s KILL ${seconds} ${rt.run})`
+  rt.containerMb > rt.programMb
+    ? `(ulimit -v ${rt.programMb * 1024}; exec timeout -s KILL ${seconds} ${rt.run})`
     : `timeout -s KILL ${seconds} ${rt.run}`;
 
 /** Sets $ms to the milliseconds between two /proc/uptime readings $t0 and $t1. */
@@ -206,9 +159,9 @@ export function dockerArgs(
     "--network",
     "none", // no internet / no localhost access
     "--memory",
-    rt.memory,
+    `${rt.containerMb}m`,
     "--memory-swap",
-    rt.memory, // disallow swap escape
+    `${rt.containerMb}m`, // disallow swap escape
     "--cpus",
     "0.5",
     "--pids-limit",
@@ -384,7 +337,7 @@ export async function runInSandbox(
 // ---------------------------------------------------------------------------
 
 export interface BatchOutcome {
-  /** C++ compile failure: the compiler's output. */
+  /** Compile failure (compiled languages): the compiler's output. */
   compileError?: string;
   /** One record per test that finished, in order. */
   records: TestRunRecord[];
